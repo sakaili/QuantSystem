@@ -532,6 +532,17 @@ class GridStrategy:
                         grid_state.lower_orders[level] = order.order_id
                         logger.info(f"{symbol} 恢复遗失的下方网格 Grid{level}")
 
+        # 清理state中已失效的订单ID（在补充网格之前清理，避免误删新订单）
+        for level, order_id in list(grid_state.upper_orders.items()):
+            if order_id not in open_order_ids:
+                del grid_state.upper_orders[level]
+                logger.warning(f"{symbol} 检测到异常消失的上方订单 Grid+{level}")
+
+        for level, order_id in list(grid_state.lower_orders.items()):
+            if order_id not in open_order_ids:
+                del grid_state.lower_orders[level]
+                logger.warning(f"{symbol} 检测到异常消失的下方订单 Grid-{level}")
+
         # 修复上方网格
         for level in grid_state.grid_prices.get_upper_levels():
             if level not in grid_state.upper_orders:
@@ -557,17 +568,6 @@ class GridStrategy:
                 if current_price > target_price:
                     logger.info(f"{symbol} 补充缺失的下方网格 Grid{level}")
                     self._repair_single_lower_grid(symbol, grid_state, level, target_price)
-
-        # 清理state中已失效的订单ID
-        for level, order_id in list(grid_state.upper_orders.items()):
-            if order_id not in open_order_ids:
-                del grid_state.upper_orders[level]
-                logger.warning(f"{symbol} 检测到异常消失的上方订单 Grid+{level}")
-
-        for level, order_id in list(grid_state.lower_orders.items()):
-            if order_id not in open_order_ids:
-                del grid_state.lower_orders[level]
-                logger.warning(f"{symbol} 检测到异常消失的下方订单 Grid-{level}")
 
     def _repair_single_upper_grid(self, symbol: str, grid_state: GridState, level: int, price: float) -> None:
         """

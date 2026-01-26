@@ -150,12 +150,12 @@ class ExchangeConnector:
         # 订单缓存
         self.order_cache: Dict[str, Order] = {}
 
-        # 设置双向持仓模式（允许同时持有多空）
+        # 设置单向持仓模式（只能持有一个方向的仓位）
         try:
-            self.exchange.set_position_mode(True)  # True = 双向持仓模式
-            logger.info("已设置为双向持仓模式(Hedge Mode)")
+            self.exchange.set_position_mode(False)  # False = 单向持仓模式
+            logger.info("已设置为单向持仓模式(One-Way Mode)")
         except Exception as e:
-            logger.warning(f"设置持仓模式失败(可能已是双向模式): {e}")
+            logger.warning(f"设置持仓模式失败(可能已是单向模式): {e}")
 
         logger.info("交易所连接器初始化完成")
 
@@ -191,9 +191,7 @@ class ExchangeConnector:
 
         try:
             # 构建订单参数
-            params = {
-                'positionSide': 'SHORT',  # 明确指定为空头仓位
-            }
+            params = {}
 
             # 只在需要reduce_only时才添加参数
             if reduce_only:

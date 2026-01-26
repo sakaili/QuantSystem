@@ -21,12 +21,12 @@ import numpy as np
 import pandas as pd
 
 # ensure project root
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from QuantSystem.data_fetcher import BinanceDataFetcher
-from QuantSystem.daily_candidate_scan import run_scan
+from data_fetcher import BinanceDataFetcher
+from daily_candidate_scan import run_scan
 
 logger = logging.getLogger("eth_correlation")
 

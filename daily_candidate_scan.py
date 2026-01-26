@@ -23,14 +23,14 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set
 
 # ensure project root
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import pandas as pd
 
-from QuantSystem.data_fetcher import BinanceDataFetcher, SymbolMetadata
-from QuantSystem.async_data_fetcher import fetch_funding_rates_optimized
+from data_fetcher import BinanceDataFetcher, SymbolMetadata
+from async_data_fetcher import fetch_funding_rates_optimized
 
 logger = logging.getLogger("daily_scan")
 

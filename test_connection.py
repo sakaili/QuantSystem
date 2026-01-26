@@ -8,8 +8,8 @@ from pathlib import Path
 # 添加项目路径
 sys.path.insert(0, str(Path(__file__).parent))
 
-from QuantSystem.data_fetcher import BinanceDataFetcher
-from QuantSystem.utils.logger import setup_logger
+from data_fetcher import BinanceDataFetcher
+from utils.logger import setup_logger
 
 # 设置日志
 logger = setup_logger(name="Test", log_level="INFO", console_output=True)

@@ -267,11 +267,11 @@ if __name__ == "__main__":
     from pathlib import Path
 
     # 添加项目路径
-    ROOT = Path(__file__).resolve().parents[1]
+    ROOT = Path(__file__).resolve().parent
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
 
-    from QuantSystem.data_fetcher import BinanceDataFetcher
+    from data_fetcher import BinanceDataFetcher
 
     # 测试币种列表
     test_symbols = [

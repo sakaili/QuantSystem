@@ -9,6 +9,7 @@ import argparse
 import signal
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, date, timezone
 from enum import Enum
 from pathlib import Path
@@ -269,8 +270,10 @@ class TradingBot:
 
         logger.info(f"评估{len(candidates)}个候选币种...")
 
+        # 筛选符合条件的币种
+        symbols_to_init = []
         for symbol in candidates:
-            if current_count >= max_count:
+            if current_count + len(symbols_to_init) >= max_count:
                 break
 
             # 检查是否已持仓
@@ -283,22 +286,42 @@ class TradingBot:
                 logger.warning("保证金不足,无法开新仓")
                 break
 
-            # 获取当前价格作为入场价
-            try:
-                entry_price = self.connector.get_current_price(symbol)
-                logger.info(f"准备开仓: {symbol} @ {entry_price}")
+            symbols_to_init.append(symbol)
 
-                # 初始化网格
-                success = self.grid_strategy.initialize_grid(symbol, entry_price)
+        if not symbols_to_init:
+            logger.info("没有符合条件的候选币种")
+            return
 
-                if success:
-                    current_count += 1
-                    logger.info(f"开仓成功: {symbol}")
-                else:
-                    logger.warning(f"开仓失败: {symbol}")
+        logger.info(f"准备并行初始化{len(symbols_to_init)}个币种: {symbols_to_init}")
 
-            except Exception as e:
-                logger.error(f"评估入场失败 {symbol}: {e}")
+        # 并行初始化所有候选币种
+        with ThreadPoolExecutor(max_workers=len(symbols_to_init)) as executor:
+            # 提交所有初始化任务
+            future_to_symbol = {}
+            for symbol in symbols_to_init:
+                try:
+                    entry_price = self.connector.get_current_price(symbol)
+                    logger.info(f"提交初始化任务: {symbol} @ {entry_price}")
+                    future = executor.submit(self.grid_strategy.initialize_grid, symbol, entry_price)
+                    future_to_symbol[future] = symbol
+                except Exception as e:
+                    logger.error(f"获取价格失败 {symbol}: {e}")
+
+            # 等待所有任务完成（每个最多1小时，所以总超时 = 1小时 + 缓冲）
+            success_count = 0
+            for future in as_completed(future_to_symbol.keys(), timeout=3900):  # 65分钟总超时
+                symbol = future_to_symbol[future]
+                try:
+                    success = future.result()
+                    if success:
+                        success_count += 1
+                        logger.info(f"✅ 并行初始化成功: {symbol}")
+                    else:
+                        logger.warning(f"❌ 并行初始化失败: {symbol}")
+                except Exception as e:
+                    logger.error(f"❌ 并行初始化异常 {symbol}: {e}")
+
+            logger.info(f"并行初始化完成: 成功{success_count}/{len(symbols_to_init)}个币种")
 
     def monitor_existing_positions(self) -> None:
         """监控现有持仓"""

@@ -190,7 +190,7 @@ class GridStrategy:
 
             # 2. 轮询等待基础仓位成交（关键：确保持有空仓后再挂网格）
             logger.info(f"等待基础仓位成交: order_id={base_order_id}")
-            base_filled = self._wait_for_order_fill(symbol, base_order_id, timeout=60)
+            base_filled = self._wait_for_order_fill(symbol, base_order_id, timeout=3600)  # 1小时超时
 
             if not base_filled:
                 logger.error(f"基础仓位超时未成交，初始化失败")

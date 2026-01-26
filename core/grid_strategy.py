@@ -188,7 +188,18 @@ class GridStrategy:
 
             base_order_id = base_order.order_id  # 保存用于可能的清理
 
-            # 2. 创建网格状态
+            # 2. 轮询等待基础仓位成交（关键：确保持有空仓后再挂网格）
+            logger.info(f"等待基础仓位成交: order_id={base_order_id}")
+            base_filled = self._wait_for_order_fill(symbol, base_order_id, timeout=60)
+
+            if not base_filled:
+                logger.error(f"基础仓位超时未成交，初始化失败")
+                self._cleanup_failed_initialization(symbol, base_order_id)
+                return False
+
+            logger.info(f"✅ 基础仓位已成交，开始挂网格")
+
+            # 3. 创建网格状态
             grid_state = GridState(
                 symbol=symbol,
                 entry_price=entry_price,
@@ -197,10 +208,15 @@ class GridStrategy:
 
             self.grid_states[symbol] = grid_state
 
-            # 3. 挂上方网格订单(开空)
+            # 4. 挂基础仓位的分层止盈单（先挂止盈保护）
+            logger.info("挂基础仓位分层止盈单...")
+            self._place_base_position_take_profit(symbol, grid_state)
+
+            # 5. 挂上方网格订单(开空)
+            logger.info("挂上方网格...")
             self._place_upper_grid_orders(symbol, grid_state)
 
-            # 4. 验证网格创建成功率
+            # 6. 验证网格创建成功率
             validation_passed, validation_msg = self._validate_grid_creation(symbol, grid_state)
 
             if not validation_passed:
@@ -208,11 +224,7 @@ class GridStrategy:
                 self._cleanup_failed_initialization(symbol, base_order_id)
                 return False
 
-            # 5. 等待基础仓位成交后，挂基础仓位的分层止盈单
-            # 策略：将基础仓位平均分配到10个下方网格层级
-            logger.info("等待基础仓位成交后挂止盈单...")
-
-            # 6. 添加到仓位管理器
+            # 7. 添加到仓位管理器
             self.position_mgr.add_position(symbol, entry_price)
 
             logger.info(f"网格初始化完成: {symbol}")
@@ -224,6 +236,58 @@ class GridStrategy:
             if symbol in self.grid_states:
                 self._cleanup_failed_initialization(symbol, None)
             return False
+
+    def _wait_for_order_fill(self, symbol: str, order_id: str, timeout: int = 60) -> bool:
+        """
+        轮询等待订单成交
+
+        Args:
+            symbol: 交易对
+            order_id: 订单ID
+            timeout: 超时时间(秒)
+
+        Returns:
+            是否成交
+        """
+        import time
+        from datetime import datetime, timezone
+
+        start_time = datetime.now(timezone.utc)
+        check_interval = 3  # 每3秒检查一次
+
+        logger.info(f"开始轮询订单状态: order_id={order_id}, 超时={timeout}秒")
+
+        while True:
+            elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
+
+            if elapsed > timeout:
+                logger.warning(f"订单等待超时({timeout}秒): order_id={order_id}")
+                return False
+
+            try:
+                # 查询订单状态
+                open_orders = self.connector.query_open_orders(symbol)
+                order_still_open = any(o.order_id == order_id for o in open_orders)
+
+                if not order_still_open:
+                    # 订单不在挂单列表中，说明已成交或取消
+                    # 确认持仓是否增加
+                    positions = self.connector.query_positions()
+                    has_position = any(p.symbol == symbol and abs(p.contracts) > 0 for p in positions)
+
+                    if has_position:
+                        logger.info(f"✅ 订单已成交: order_id={order_id}, 耗时={elapsed:.1f}秒")
+                        return True
+                    else:
+                        logger.warning(f"订单已取消或失败: order_id={order_id}")
+                        return False
+
+                logger.info(f"订单等待中... ({elapsed:.0f}/{timeout}秒)")
+                time.sleep(check_interval)
+
+            except Exception as e:
+                logger.warning(f"查询订单状态失败: {e}, 继续等待...")
+                time.sleep(check_interval)
 
     def _validate_grid_creation(self, symbol: str, grid_state: GridState) -> tuple:
         """

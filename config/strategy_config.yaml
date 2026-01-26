@@ -32,8 +32,8 @@ grid:
 # 仓位配置 - Position Settings
 position:
   max_symbols: 5                # 最多持仓币种数(5个品种同时交易)
-  base_margin: 30.0             # 基础仓位保证金(USDT,每品种) - 提高以满足Binance 5 USDT最小名义价值要求
-  grid_margin: 10.5             # 单网格保证金(USDT,每品种) - 提高以满足Binance 5 USDT最小名义价值要求
+  base_margin: 50.0             # 基础仓位保证金(USDT,每品种) - 核心空头持仓
+  grid_margin: 10.5             # 单网格保证金(USDT,每品种) - 波动收益
   # single_symbol_max: 改为动态计算 = (账户余额 × 0.9) / 5
   # total_margin_limit: 改为动态计算 = 账户余额 × 0.9
 

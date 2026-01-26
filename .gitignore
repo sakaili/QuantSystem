@@ -1,0 +1,27 @@
+# 添加环境变量配置文件
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 数据和日志
+logs/
+data/database.db
+data/daily_scans/*.csv
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 检查点文件
+checkpoint.json

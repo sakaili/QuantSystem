@@ -1,0 +1,58 @@
+# 策略参数配置
+# Strategy Configuration
+version: "1.0"
+
+# 账户配置 - Account Settings
+account:
+  # size: 100.0                 # 已移除:不再硬编码账户规模,改为启动时动态获取
+  usage_ratio: 0.9              # 资金使用率(90%用于交易,10%作缓冲)
+  leverage: 2                   # 杠杆倍数
+  order_type: "post_only"       # 订单类型(仅Maker订单)
+  maker_fee: 0.0002             # Maker手续费 0.02%
+
+# 网格配置 - Grid Settings
+grid:
+  count: 20                     # 网格总数
+  spacing: 0.015                # 网格间距(0.5%,从1%优化)
+  upper_grids: 10               # 上方网格数(开空)
+  lower_grids: 10               # 下方网格数(平空)
+
+  # 网格修复配置
+  repair_enabled: true          # 启用自动修复
+  repair_interval: 10           # 每10秒检查一次
+  max_repair_retries: 3         # 单个网格最多重试3次
+  min_success_rate_upper: 0.8   # 上方网格最低80%成功率
+  min_success_rate_lower: 0.8   # 下方网格最低80%成功率
+
+  # 移动网格配置（无限网格策略）
+  dynamic_expansion: true       # 启用动态扩展
+  max_total_grids: 30           # 最大总网格数（上方+下方）
+  max_side_grids: 15            # 单侧最多网格数
+
+# 仓位配置 - Position Settings
+position:
+  max_symbols: 5                # 最多持仓币种数(5个品种同时交易)
+  base_margin: 15.0             # 基础仓位保证金(USDT,每品种)
+  grid_margin: 5.25             # 单网格保证金(USDT,每品种)
+  # single_symbol_max: 改为动态计算 = (账户余额 × 0.9) / 5
+  # total_margin_limit: 改为动态计算 = 账户余额 × 0.9
+
+# 币种筛选 - Screening Criteria
+screening:
+  bottom_n: 50                  # 流动性排名倒数N
+  min_listing_days: 365         # 最小上市天数
+  funding_rate_floor: 0.0       # 资金费率下限(>0,多头付费给空头)
+  atr_spike_multiplier: 3.0     # ATR暴涨倍数阈值
+
+# 交易时间 - Schedule
+schedule:
+  scan_hour: 0                  # 每日筛选时间(UTC小时)
+  scan_interval: 86400          # 筛选间隔(秒)
+  monitor_interval: 10          # 监控循环间隔(秒)
+
+# 换仓配置 - Rebalancing Settings
+rebalancing:
+  enabled: false                 # 是否启用盈利换仓
+  profit_threshold: 0.15        # 盈利目标(15%)
+  cooldown_hours: 24            # 冷却期(小时)
+  max_rebalances_per_day: 3     # 单日最大换仓次数

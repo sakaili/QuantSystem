@@ -1,0 +1,76 @@
+# Python缓存和编译文件
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# 环境变量（将在运行时挂载）
+.env
+.env.local
+.env.*
+
+# 日志和数据（将在运行时挂载）
+logs/
+data/
+*.log
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE和编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Docker相关
+Dockerfile
+docker-compose.yml
+.dockerignore
+*.tar.gz
+
+# 文档
+*.md
+docs/
+
+# 测试脚本
+test-*.sh
+test-*.py
+*_test.py
+
+# OS特定文件
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 临时文件
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# Jupyter notebooks
+*.ipynb
+.ipynb_checkpoints/
+
+# 虚拟环境
+venv/
+env/
+ENV/
+.venv
+
+# 其他
+checkpoint.json
+*.csv
+

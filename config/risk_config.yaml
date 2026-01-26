@@ -1,0 +1,45 @@
+# 风险控制参数配置
+# Risk Management Configuration
+version: "1.0"
+
+# 止损配置 - Stop Loss Settings
+stop_loss:
+  ratio: 1.20                   # 止损线(1.20×P0, 即20%止损)
+  order_type: "market"          # 止损订单类型
+
+# 止盈配置 - Take Profit Settings
+take_profit:
+  partial_close_ratio: 0.5      # 部分平仓比例
+  trigger_level: -10            # 触发层级(Grid-10)
+
+# 资金费率风险 - Funding Rate Risk
+funding_rate:
+  floor: 0.0                    # 资金费率下限(>0,多头付费给空头)
+  negative_days: 3              # 负费率持续天数阈值(连续负值触发平仓)
+
+# 预警等级 - Alert Levels
+alerts:
+  level_1_price: 1.12           # 一级预警(距20%止损8个点)
+  level_2_price: 1.16           # 二级预警(距20%止损4个点)
+  level_3_price: 1.20           # 三级预警(触发20%止损)
+
+# 仓位风险 - Position Risk
+position_risk:
+  max_margin_usage: 0.225       # 最大保证金占用比例(22.5%)
+  max_leverage_total: 2         # 总杠杆上限
+
+# 流动性风险 - Liquidity Risk
+liquidity:
+  volume_spike_multiplier: 5.0  # 成交额暴涨倍数(5倍)
+  min_24h_volume: 10000.0       # 最小24h成交额(USDT)
+
+# 盈利止盈配置 - Profit Taking Settings
+profit_taking:
+  enabled: true                 # 是否启用盈利换仓
+  threshold: 0.15               # 盈利目标阈值(15%)
+  partial_exit: false           # 全仓平仓(false)还是部分平仓(true)
+
+# 账户级风险配置 - Account Level Risk
+account_risk:
+  max_total_drawdown: 0.15      # 总账户最大回撤比例(15%)
+  emergency_exit_threshold: 0.25 # 紧急止损阈值(25%)

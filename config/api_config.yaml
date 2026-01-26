@@ -1,0 +1,32 @@
+# API配置(敏感信息)
+# API Configuration (Sensitive Information)
+version: "1.0"
+
+# Binance API
+# 重要: 请使用环境变量设置API密钥,不要直接写在此文件
+# Important: Use environment variables for API keys, do not hardcode here
+binance:
+  api_key: "${BINANCE_API_KEY}"         # 从环境变量读取
+  api_secret: "${BINANCE_API_SECRET}"   # 从环境变量读取
+  testnet: false                         # 测试网开关(true=测试网, false=实盘)
+
+# 代理配置 - Proxy Settings
+proxy:
+  enabled: false                # 是否启用代理
+  http_proxy: ""                # HTTP代理地址
+  https_proxy: ""               # HTTPS代理地址
+
+# 速率限制 - Rate Limiting
+rate_limit:
+  max_calls_per_minute: 1200    # 每分钟最大调用次数
+  cooldown: 0.1                 # 请求间隔(秒)
+
+# 超时设置 - Timeout Settings
+timeout:
+  connect: 10                   # 连接超时(秒)
+  read: 30                      # 读取超时(秒)
+
+# 重试策略 - Retry Strategy
+retry:
+  max_attempts: 3               # 最大重试次数
+  backoff_factor: 2.0           # 退避因子(指数退避)

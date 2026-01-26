@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  trading-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: quant-trading-bot:latest
+    container_name: quant-trading-bot
+    restart: unless-stopped
+
+    environment:
+      # 从.env文件加载环境变量
+      - BINANCE_API_KEY=${BINANCE_API_KEY}
+      - BINANCE_API_SECRET=${BINANCE_API_SECRET}
+      - TZ=UTC
+      - PYTHONUNBUFFERED=1
+
+    volumes:
+      # 持久化数据
+      - ./logs:/app/logs
+      - ./data:/app/data
+      - ./config:/app/config:ro  # 只读挂载配置文件
+
+    # 网络配置
+    network_mode: bridge
+
+    # 日志配置
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+        compress: "true"
+
+    # 资源限制
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "test", "-f", "/app/logs/bot.log"]
+      interval: 60s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+

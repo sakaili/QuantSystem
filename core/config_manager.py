@@ -6,9 +6,9 @@ Configuration Manager Module
 """
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 import yaml
 
@@ -54,6 +54,7 @@ class PositionConfig:
     max_symbols: int            # 最多持仓币种数
     base_margin: float          # 基础仓位保证金
     grid_margin: float          # 单网格保证金
+    manual_symbols: List[str] = field(default_factory=list)  # 手动指定必开币种
     # single_symbol_max: 已移除,改为动态计算
     # total_margin_limit: 已移除,改为动态计算
 

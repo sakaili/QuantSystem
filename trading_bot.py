@@ -245,7 +245,13 @@ class TradingBot:
             self.current_candidates = valid_candidates[:10]  # 保存前10个候选
             logger.info(f"更新候选币列表: {self.current_candidates}")
 
-            # 评估入场机会
+            # 1. 优先处理手动指定币种
+            manual_symbols = self.config_mgr.position.manual_symbols
+            if manual_symbols:
+                logger.info(f"检测到手动指定币种: {manual_symbols}")
+                self.evaluate_new_entries(manual_symbols)
+
+            # 2. 处理筛选出的候选币种
             self.evaluate_new_entries(valid_candidates[:5])
 
             self.last_scan_date = today
@@ -414,6 +420,11 @@ class TradingBot:
 
         # 执行换仓
         for symbol in symbols_to_rebalance:
+            # 保护手动指定币种（永不换仓）
+            if symbol in self.config_mgr.position.manual_symbols:
+                logger.info(f"{symbol} 是手动指定币种，跳过换仓")
+                continue
+
             # 检查是否仍在候选币中（如果仍是好标的，继续持有让利润奔跑）
             if symbol in self.current_candidates:
                 logger.info(f"{symbol} 盈利达标但仍在候选币中，继续持有")

@@ -130,6 +130,7 @@ class TradingBot:
         self.state = BotState.IDLE
         self.running = True
         self.last_scan_date: Optional[date] = None
+        self.current_candidates: List[str] = []  # 当前有效候选币种列表
 
         # 信号处理
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -239,6 +240,10 @@ class TradingBot:
                     logger.warning(f"检查{symbol}失败: {e}")
 
             logger.info(f"有效候选币种: {len(valid_candidates)}个")
+
+            # 保存当前候选币列表（供换仓逻辑使用）
+            self.current_candidates = valid_candidates[:10]  # 保存前10个候选
+            logger.info(f"更新候选币列表: {self.current_candidates}")
 
             # 评估入场机会
             self.evaluate_new_entries(valid_candidates[:5])
@@ -409,10 +414,17 @@ class TradingBot:
 
         # 执行换仓
         for symbol in symbols_to_rebalance:
+            # 检查是否仍在候选币中（如果仍是好标的，继续持有让利润奔跑）
+            if symbol in self.current_candidates:
+                logger.info(f"{symbol} 盈利达标但仍在候选币中，继续持有")
+                continue
+
             # 二次确认盈利率(防止触发时profit=15%,执行时已跌至10%)
             if not self.profit_monitor.verify_profit_before_rebalance(symbol, min_threshold=0.10):
                 logger.warning(f"{symbol} 盈利已回撤,取消换仓")
                 continue
+
+            logger.info(f"{symbol} 盈利达标且不在候选币中，准备换仓")
 
             try:
                 success = self.execute_rebalancing(symbol, reason="profit_target")

@@ -52,7 +52,7 @@ schedule:
 
 # 换仓配置 - Rebalancing Settings
 rebalancing:
-  enabled: false                 # 是否启用盈利换仓
+  enabled: true                  # 启用盈利换仓（当盈利达标且不在候选币中时）
   profit_threshold: 0.15        # 盈利目标(15%)
   cooldown_hours: 24            # 冷却期(小时)
   max_rebalances_per_day: 3     # 单日最大换仓次数

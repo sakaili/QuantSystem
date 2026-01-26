@@ -10,8 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
-from ..utils.exceptions import DatabaseError
-from ..utils.logger import get_logger
+from utils.exceptions import DatabaseError
+from utils.logger import get_logger
 
 logger = get_logger("database")
 

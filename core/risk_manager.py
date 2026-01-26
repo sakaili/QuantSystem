@@ -13,8 +13,8 @@ from .exchange_connector import ExchangeConnector
 from .position_manager import PositionManager
 from .grid_strategy import GridStrategy
 from .config_manager import ConfigManager
-from ..utils.exceptions import RiskError
-from ..utils.logger import get_logger
+from utils.exceptions import RiskError
+from utils.logger import get_logger
 
 logger = get_logger("risk")
 

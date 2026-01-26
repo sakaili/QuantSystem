@@ -12,11 +12,11 @@ from datetime import datetime, timezone
 from functools import wraps
 from typing import Dict, List, Optional, Any
 
-from ..data_fetcher import BinanceDataFetcher
-from ..utils.exceptions import (
+from data_fetcher import BinanceDataFetcher
+from utils.exceptions import (
     OrderError, NetworkError, RateLimitError, ExchangeError
 )
-from ..utils.logger import get_logger
+from utils.logger import get_logger
 
 logger = get_logger("exchange")
 

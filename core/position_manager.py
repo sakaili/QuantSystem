@@ -11,8 +11,8 @@ from typing import Dict, List, Optional
 
 from .exchange_connector import ExchangeConnector, Position
 from .config_manager import ConfigManager
-from ..utils.exceptions import PositionError, InsufficientMarginError, PositionLimitError
-from ..utils.logger import get_logger
+from utils.exceptions import PositionError, InsufficientMarginError, PositionLimitError
+from utils.logger import get_logger
 
 logger = get_logger("position")
 

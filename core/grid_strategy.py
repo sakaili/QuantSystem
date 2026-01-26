@@ -12,8 +12,8 @@ from typing import Dict, List, Optional, Set
 from .exchange_connector import ExchangeConnector, Order
 from .position_manager import PositionManager, SymbolPosition
 from .config_manager import ConfigManager
-from ..utils.exceptions import OrderError
-from ..utils.logger import get_logger
+from utils.exceptions import OrderError
+from utils.logger import get_logger
 
 logger = get_logger("grid")
 

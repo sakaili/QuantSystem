@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
-from ..utils.logger import get_logger
+from utils.logger import get_logger
 
 logger = get_logger("profit_monitor")
 

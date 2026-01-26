@@ -10,8 +10,8 @@ from datetime import datetime, timezone
 from typing import Dict, Optional
 
 from .exchange_connector import ExchangeConnector
-from ..utils.exceptions import InsufficientMarginError, PositionLimitError
-from ..utils.logger import get_logger
+from utils.exceptions import InsufficientMarginError, PositionLimitError
+from utils.logger import get_logger
 
 logger = get_logger("capital_allocator")
 

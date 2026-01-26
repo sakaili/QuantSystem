@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Set
 
-from ..utils.logger import get_logger
+from utils.logger import get_logger
 
 logger = get_logger("rebalance_manager")
 

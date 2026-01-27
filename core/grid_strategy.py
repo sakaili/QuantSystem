@@ -5,6 +5,7 @@ Grid Strategy Module
 实现网格交易策略逻辑
 """
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set
@@ -48,10 +49,23 @@ class GridPrices:
         self.grid_levels[new_level] = new_price
         return new_level
 
+    def add_level(self, level: int, price: float) -> None:
+        """
+        添加指定层级的网格
+
+        Args:
+            level: 网格层级
+            price: 价格
+        """
+        self.grid_levels[level] = price
+        logger.debug(f"添加网格层级 Grid{level:+d} @ {price:.6f}")
+
     def remove_level(self, level: int) -> None:
         """移除指定层级的网格"""
         if level in self.grid_levels:
+            price = self.grid_levels[level]
             del self.grid_levels[level]
+            logger.debug(f"移除网格层级 Grid{level:+d} @ {price:.6f}")
 
 
 @dataclass
@@ -533,6 +547,28 @@ class GridStrategy:
         except Exception as e:
             logger.warning(f"挂增强止盈单失败 Grid-{level}: {e}")
 
+    def _place_single_lower_grid(self, symbol: str, grid_state: GridState, level: int, price: float) -> None:
+        """
+        挂单个下方网格订单（用于滚动窗口添加新网格）
+
+        Args:
+            symbol: 交易对
+            grid_state: 网格状态
+            level: 网格层级（负数）
+            price: 价格
+        """
+        try:
+            # 判断是否需要增强止盈单（如果对应的上方网格已成交）
+            opposite_level = abs(level)
+            if opposite_level in grid_state.filled_grids:
+                # 使用增强止盈单
+                self._place_enhanced_lower_grid_order(symbol, grid_state, level)
+            else:
+                # 使用基础止盈单
+                self._place_lower_grid_order(symbol, grid_state, level)
+        except Exception as e:
+            logger.warning(f"挂下方网格失败 Grid{level}: {e}")
+
     def _should_check_grid_repair(self, grid_state: GridState) -> bool:
         """
         判断是否应该检查网格修复（至少间隔10秒）
@@ -710,9 +746,9 @@ class GridStrategy:
 
     def _try_extend_grid(self, symbol: str, grid_state: GridState, filled_level: int) -> None:
         """
-        尝试扩展网格范围（移动网格策略）
+        滚动窗口网格扩展
 
-        当边界网格成交时，在对侧添加新网格，并移除最远端网格以保持总数≤30
+        当边界网格成交时，在对侧靠近当前价格的位置添加新网格，同时移除最远端网格
 
         Args:
             symbol: 交易对
@@ -723,8 +759,15 @@ class GridStrategy:
         if not self.config.grid.dynamic_expansion:
             return
 
+        # 获取当前价格
+        try:
+            current_price = self.connector.get_current_price(symbol)
+        except Exception as e:
+            logger.warning(f"{symbol} 获取当前价格失败，跳过网格扩展: {e}")
+            return
+
+        spacing = self.config.grid.spacing  # 0.015
         max_total_grids = self.config.grid.max_total_grids  # 30
-        max_side_grids = self.config.grid.max_side_grids    # 15
 
         upper_levels = grid_state.grid_prices.get_upper_levels()
         lower_levels = grid_state.grid_prices.get_lower_levels()
@@ -733,37 +776,55 @@ class GridStrategy:
         # 检查是否触发边界扩展
         if filled_level > 0:  # 上方网格成交（价格上涨）
             max_upper = max(upper_levels) if upper_levels else 0
-            if filled_level == max_upper and len(upper_levels) < max_side_grids:
-                # 在上方添加新网格
-                new_level = grid_state.grid_prices.add_level_above(max_upper)
-                new_price = grid_state.grid_prices.grid_levels[new_level]
-                logger.info(f"{symbol} 价格上涨，添加上方网格 Grid+{new_level} @ {new_price:.6f}")
 
-                # 挂新的上方网格订单
-                self._place_single_upper_grid(symbol, grid_state, new_level, new_price)
+            if filled_level == max_upper:
+                # 1. 在上方添加新网格（基于当前价格计算）
+                new_upper_price = current_price * (1 + spacing)
+                new_upper_level = self._calculate_grid_level(new_upper_price, grid_state.entry_price, spacing)
 
-                # 检查总数，如果超过30，移除最下方网格
-                if total_grids + 1 > max_total_grids and lower_levels:
+                grid_state.grid_prices.add_level(new_upper_level, new_upper_price)
+                self._place_single_upper_grid(symbol, grid_state, new_upper_level, new_upper_price)
+                logger.info(f"{symbol} 滚动窗口：添加上方网格 Grid+{new_upper_level} @ {new_upper_price:.6f}")
+
+                # 2. 在下方添加新网格（靠近当前价格！）
+                new_lower_price = current_price * (1 - spacing)
+                new_lower_level = self._calculate_grid_level(new_lower_price, grid_state.entry_price, spacing)
+
+                grid_state.grid_prices.add_level(new_lower_level, new_lower_price)
+                self._place_single_lower_grid(symbol, grid_state, new_lower_level, new_lower_price)
+                logger.info(f"{symbol} 滚动窗口：添加下方网格 Grid{new_lower_level} @ {new_lower_price:.6f}")
+
+                # 3. 如果总数超过30，移除最远的下方网格
+                if total_grids + 2 > max_total_grids and lower_levels:
                     min_lower = min(lower_levels)
                     self._remove_grid_level(symbol, grid_state, min_lower)
-                    logger.info(f"{symbol} 网格数超限，移除最下方 Grid{min_lower}")
+                    logger.info(f"{symbol} 移除最远下方网格 Grid{min_lower}")
 
-        elif filled_level < 0:  # 下方网格成交（价格下跌/止盈）
+        elif filled_level < 0:  # 下方网格成交（价格下跌）
             min_lower = min(lower_levels) if lower_levels else 0
-            if filled_level == min_lower and abs(min_lower) < max_side_grids:
-                # 在下方添加新网格
-                new_level = grid_state.grid_prices.add_level_below(min_lower)
-                new_price = grid_state.grid_prices.grid_levels[new_level]
-                logger.info(f"{symbol} 价格下跌，添加下方网格 Grid{new_level} @ {new_price:.6f}")
 
-                # 挂新的下方网格订单
-                self._place_single_lower_grid(symbol, grid_state, new_level, new_price)
+            if filled_level == min_lower:
+                # 1. 在下方添加新网格（基于当前价格计算）
+                new_lower_price = current_price * (1 - spacing)
+                new_lower_level = self._calculate_grid_level(new_lower_price, grid_state.entry_price, spacing)
 
-                # 检查总数，如果超过30，移除最上方网格
-                if total_grids + 1 > max_total_grids and upper_levels:
+                grid_state.grid_prices.add_level(new_lower_level, new_lower_price)
+                self._place_single_lower_grid(symbol, grid_state, new_lower_level, new_lower_price)
+                logger.info(f"{symbol} 滚动窗口：添加下方网格 Grid{new_lower_level} @ {new_lower_price:.6f}")
+
+                # 2. 在上方添加新网格（靠近当前价格！）
+                new_upper_price = current_price * (1 + spacing)
+                new_upper_level = self._calculate_grid_level(new_upper_price, grid_state.entry_price, spacing)
+
+                grid_state.grid_prices.add_level(new_upper_level, new_upper_price)
+                self._place_single_upper_grid(symbol, grid_state, new_upper_level, new_upper_price)
+                logger.info(f"{symbol} 滚动窗口：添加上方网格 Grid+{new_upper_level} @ {new_upper_price:.6f}")
+
+                # 3. 如果总数超过30，移除最远的上方网格
+                if total_grids + 2 > max_total_grids and upper_levels:
                     max_upper = max(upper_levels)
                     self._remove_grid_level(symbol, grid_state, max_upper)
-                    logger.info(f"{symbol} 网格数超限，移除最上方 Grid+{max_upper}")
+                    logger.info(f"{symbol} 移除最远上方网格 Grid+{max_upper}")
 
     def _place_single_upper_grid(self, symbol: str, grid_state: GridState, level: int, price: float) -> None:
         """
@@ -1098,3 +1159,24 @@ class GridStrategy:
             amount = round(amount, 3)
 
         return amount
+
+    def _calculate_grid_level(self, price: float, entry_price: float, spacing: float) -> int:
+        """
+        根据价格计算网格层级
+
+        Args:
+            price: 目标价格
+            entry_price: 入场价格
+            spacing: 网格间距
+
+        Returns:
+            网格层级（正数=上方，负数=下方，0=入场价）
+        """
+        if price >= entry_price:
+            # 上方网格
+            level = round(math.log(price / entry_price) / math.log(1 + spacing))
+            return max(1, level)  # 至少为1
+        else:
+            # 下方网格
+            level = round(math.log(price / entry_price) / math.log(1 - spacing))
+            return min(-1, level)  # 至少为-1

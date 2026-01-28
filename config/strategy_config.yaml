@@ -35,6 +35,7 @@ position:
   base_margin: 50.0             # 基础仓位保证金(USDT,每品种) - 核心空头持仓
   grid_margin: 10.5             # 单网格保证金(USDT,每品种) - 波动收益
   manual_symbols: [1000WHYUSDT]            # 手动指定必开币种(占用max_symbols配额), 例: ["BTCUSDT", "ETHUSDT"]
+  min_base_position_ratio: 0.3  # 最小保留基础仓位比例(30%) - 防止完全平仓
   # single_symbol_max: 改为动态计算 = (账户余额 × 0.9) / 5
   # total_margin_limit: 改为动态计算 = 账户余额 × 0.9
 

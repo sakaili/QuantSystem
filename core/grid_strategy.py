@@ -69,19 +69,27 @@ class GridPrices:
 
 
 @dataclass
+class UpperGridFill:
+    """上方网格成交信息"""
+    price: float          # 开仓价格
+    amount: float         # 开仓数量
+    fill_time: datetime   # 成交时间
+    order_id: str         # 订单ID
+    matched_lower_price: Optional[float] = None  # 匹配的下方止盈价格
+
+
+@dataclass
 class GridState:
     """网格状态"""
     symbol: str
     entry_price: float
     grid_prices: GridPrices
-    upper_orders: Dict[int, str] = field(default_factory=dict)  # level -> order_id
-    lower_orders: Dict[int, str] = field(default_factory=dict)  # level -> order_id
-    filled_grids: Set[int] = field(default_factory=set)         # 已成交的网格层级
+    upper_orders: Dict[float, str] = field(default_factory=dict)  # price -> order_id（改为基于价格）
+    lower_orders: Dict[float, str] = field(default_factory=dict)  # price -> order_id（改为基于价格）
+    filled_upper_grids: Dict[str, UpperGridFill] = field(default_factory=dict)  # order_id -> fill_info（记录开仓信息）
     last_update: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
-    # 网格完整性追踪
-    upper_grid_failures: Dict[int, int] = field(default_factory=dict)  # level -> 失败次数
-    lower_grid_failures: Dict[int, int] = field(default_factory=dict)  # level -> 失败次数
+    # 网格完整性追踪（简化，移除 failures 字典）
     last_repair_check: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     grid_integrity_validated: bool = False  # 是否通过初始验证
     upper_success_rate: float = 0.0         # 上方网格创建成功率
@@ -410,15 +418,15 @@ class GridStrategy:
         logger.info(f"清理完成: {symbol}")
 
     def _place_upper_grid_orders(self, symbol: str, grid_state: GridState) -> None:
-        """挂上方网格订单(开空)"""
+        """挂上方网格订单(开空) - 使用价格作为标识"""
         grid_margin = self.config.position.grid_margin
 
         for level in grid_state.grid_prices.get_upper_levels():
             try:
-                price = grid_state.grid_prices.grid_levels[level]
+                price = round(grid_state.grid_prices.grid_levels[level], 8)
                 amount = self._calculate_amount(symbol, grid_margin, price)
 
-                logger.debug(f"挂上方网格 Grid+{level}: {amount}张 × {price}")
+                logger.debug(f"挂上方网格 @ {price:.6f}: {amount}张")
                 order = self.connector.place_order_with_maker_retry(
                     symbol=symbol,
                     side='sell',  # 开空
@@ -429,10 +437,10 @@ class GridStrategy:
                     max_retries=5
                 )
 
-                grid_state.upper_orders[level] = order.order_id
+                grid_state.upper_orders[price] = order.order_id  # 使用价格作为key
 
             except Exception as e:
-                logger.warning(f"挂单失败 Grid+{level}: {e}")
+                logger.warning(f"挂单失败 @ {price:.6f}: {e}")
 
     def _place_lower_grid_orders(self, symbol: str, grid_state: GridState) -> None:
         """挂下方网格订单(平空止盈)"""
@@ -461,31 +469,44 @@ class GridStrategy:
                 logger.warning(f"挂单失败 Grid-{level}: {e}")
 
     def _place_base_position_take_profit(self, symbol: str, grid_state: GridState) -> None:
-        """挂基础仓位的分层止盈单（10个小额单）"""
+        """挂基础仓位的分层止盈单（限制数量以保留最小仓位）"""
         base_margin = self.config.position.base_margin
-        base_amount_per_level = self._calculate_amount(symbol, base_margin / 10, grid_state.entry_price)
+        min_ratio = self.config.position.min_base_position_ratio
 
-        logger.info(f"挂基础仓位止盈单: 每层{base_amount_per_level}张")
+        # 计算可平仓的比例
+        closeable_ratio = 1.0 - min_ratio  # 例如：1.0 - 0.3 = 0.7
 
-        for level in grid_state.grid_prices.get_lower_levels():
+        # 获取所有下方网格层级
+        lower_levels = grid_state.grid_prices.get_lower_levels()
+        total_levels = len(lower_levels)
+
+        # 计算允许挂止盈单的层数（向下取整）
+        allowed_levels = int(total_levels * closeable_ratio)  # 例如：10 × 0.7 = 7
+
+        # 每层数量（仍然按总层数计算，保持每层数量一致）
+        base_amount_per_level = self._calculate_amount(symbol, base_margin / total_levels, grid_state.entry_price)
+
+        logger.info(f"挂基础仓位止盈单: {allowed_levels}/{total_levels}层, 每层{base_amount_per_level:.1f}张")
+        logger.info(f"保留最小仓位: {min_ratio*100:.0f}% = {base_amount_per_level * (total_levels - allowed_levels):.1f}张")
+
+        # 只挂允许的层数（从最近的开始，即从Grid-1开始）
+        for i, level in enumerate(sorted(lower_levels, reverse=True)):
+            if i >= allowed_levels:
+                logger.debug(f"跳过 Grid{level}（保留最小仓位）")
+                break
+
             try:
-                price = grid_state.grid_prices.grid_levels[level]
-                logger.debug(f"挂基础止盈 Grid{level}: {base_amount_per_level}张 × {price}")
-                order = self.connector.place_order_with_maker_retry(
-                    symbol=symbol,
-                    side='buy',
-                    amount=base_amount_per_level,
-                    price=price,
-                    order_type='limit',
-                    post_only=True,
-                    max_retries=5
-                    # 移除reduce_only参数，让交易所自动判断
-                )
+                price = round(grid_state.grid_prices.grid_levels[level], 8)
+                logger.debug(f"挂基础止盈 @ {price:.6f}: {base_amount_per_level:.1f}张")
 
-                grid_state.lower_orders[level] = order.order_id
+                # 使用仓位感知的买单
+                order = self._place_position_aware_buy_order(symbol, price, base_amount_per_level)
+
+                if order:
+                    grid_state.lower_orders[price] = order.order_id  # 使用价格作为key
 
             except Exception as e:
-                logger.warning(f"挂基础止盈单失败 Grid-{level}: {e}")
+                logger.warning(f"挂基础止盈单失败 @ {price:.6f}: {e}")
 
     def _place_lower_grid_order(self, symbol: str, grid_state: GridState, level: int) -> None:
         """挂下方网格订单(平空) - 仅用于重新挂上方成交前的基础止盈单"""
@@ -588,7 +609,7 @@ class GridStrategy:
 
     def _repair_missing_grids(self, symbol: str, grid_state: GridState) -> None:
         """
-        检查并补充缺失的网格订单
+        检查并补充缺失的网格订单（基于价格）
 
         Args:
             symbol: 交易对
@@ -610,64 +631,67 @@ class GridStrategy:
         try:
             open_orders = self.connector.query_open_orders(symbol)
             open_order_ids = {order.order_id for order in open_orders}
+            open_order_prices = {round(order.price, 8): order.order_id for order in open_orders}
         except Exception as e:
             logger.warning(f"{symbol} 查询挂单失败，跳过修复: {e}")
             return
 
-        # 先对账：恢复遗失的订单状态
+        # 先对账：恢复遗失的订单状态（基于价格匹配）
         for order in open_orders:
-            order_price = order.price
-            # 检查上方网格
-            for level in grid_state.grid_prices.get_upper_levels():
-                target_price = grid_state.grid_prices.grid_levels[level]
-                if abs(order_price - target_price) / target_price < 0.001:  # 0.1%容差
-                    if level not in grid_state.upper_orders:
-                        grid_state.upper_orders[level] = order.order_id
-                        logger.info(f"{symbol} 恢复遗失的上方网格 Grid+{level}")
-            # 检查下方网格
-            for level in grid_state.grid_prices.get_lower_levels():
-                target_price = grid_state.grid_prices.grid_levels[level]
-                if abs(order_price - target_price) / target_price < 0.001:
-                    if level not in grid_state.lower_orders:
-                        grid_state.lower_orders[level] = order.order_id
-                        logger.info(f"{symbol} 恢复遗失的下方网格 Grid{level}")
+            order_price = round(order.price, 8)
 
-        # 清理state中已失效的订单ID（在补充网格之前清理，避免误删新订单）
-        for level, order_id in list(grid_state.upper_orders.items()):
+            # 检查是否应该在upper_orders中
+            if order.side == 'sell' and order_price not in grid_state.upper_orders:
+                # 检查价格是否接近任何预期的上方网格价格
+                for level in grid_state.grid_prices.get_upper_levels():
+                    target_price = round(grid_state.grid_prices.grid_levels[level], 8)
+                    if abs(order_price - target_price) / target_price < 0.001:  # 0.1%容差
+                        grid_state.upper_orders[order_price] = order.order_id
+                        logger.info(f"{symbol} 恢复遗失的上方网格 @ {order_price:.6f}")
+                        break
+
+            # 检查是否应该在lower_orders中
+            elif order.side == 'buy' and order_price not in grid_state.lower_orders:
+                # 检查价格是否接近任何预期的下方网格价格
+                for level in grid_state.grid_prices.get_lower_levels():
+                    target_price = round(grid_state.grid_prices.grid_levels[level], 8)
+                    if abs(order_price - target_price) / target_price < 0.001:
+                        grid_state.lower_orders[order_price] = order.order_id
+                        logger.info(f"{symbol} 恢复遗失的下方网格 @ {order_price:.6f}")
+                        break
+
+        # 清理state中已失效的订单ID
+        for price, order_id in list(grid_state.upper_orders.items()):
             if order_id not in open_order_ids:
-                del grid_state.upper_orders[level]
-                logger.warning(f"{symbol} 检测到异常消失的上方订单 Grid+{level}")
+                del grid_state.upper_orders[price]
+                logger.warning(f"{symbol} 检测到异常消失的上方订单 @ {price:.6f}")
 
-        for level, order_id in list(grid_state.lower_orders.items()):
+        for price, order_id in list(grid_state.lower_orders.items()):
             if order_id not in open_order_ids:
-                del grid_state.lower_orders[level]
-                logger.warning(f"{symbol} 检测到异常消失的下方订单 Grid-{level}")
+                del grid_state.lower_orders[price]
+                logger.warning(f"{symbol} 检测到异常消失的下方订单 @ {price:.6f}")
 
-        # 修复上方网格
+        # 修复上方网格（检查所有预期的网格价格）
         for level in grid_state.grid_prices.get_upper_levels():
-            if level not in grid_state.upper_orders:
-                failure_count = grid_state.upper_grid_failures.get(level, 0)
-                if failure_count >= self.config.grid.max_repair_retries:
-                    continue  # 已达最大重试次数，放弃
+            target_price = round(grid_state.grid_prices.grid_levels[level], 8)
 
-                target_price = grid_state.grid_prices.grid_levels[level]
+            # 检查是否缺失
+            if target_price not in grid_state.upper_orders:
                 # 只有当市价低于目标价时才补充开空单
                 if current_price < target_price:
-                    logger.info(f"{symbol} 补充缺失的上方网格 Grid+{level}")
-                    self._repair_single_upper_grid(symbol, grid_state, level, target_price)
+                    logger.info(f"{symbol} 补充缺失的上方网格 @ {target_price:.6f}")
+                    self._place_single_upper_grid_by_price(symbol, grid_state, target_price)
 
-        # 修复下方网格
+        # 修复下方网格（检查所有预期的网格价格）
         for level in grid_state.grid_prices.get_lower_levels():
-            if level not in grid_state.lower_orders:
-                failure_count = grid_state.lower_grid_failures.get(level, 0)
-                if failure_count >= self.config.grid.max_repair_retries:
-                    continue
+            target_price = round(grid_state.grid_prices.grid_levels[level], 8)
 
-                target_price = grid_state.grid_prices.grid_levels[level]
+            # 检查是否缺失
+            if target_price not in grid_state.lower_orders:
                 # 只有当市价高于目标价时才补充平空止盈单
                 if current_price > target_price:
-                    logger.info(f"{symbol} 补充缺失的下方网格 Grid{level}")
-                    self._repair_single_lower_grid(symbol, grid_state, level, target_price)
+                    logger.info(f"{symbol} 补充缺失的下方网格 @ {target_price:.6f}")
+                    self._place_single_lower_grid_by_price(symbol, grid_state, target_price)
 
     def _repair_single_upper_grid(self, symbol: str, grid_state: GridState, level: int, price: float) -> None:
         """
@@ -744,16 +768,17 @@ class GridStrategy:
             grid_state.lower_grid_failures[level] = grid_state.lower_grid_failures.get(level, 0) + 1
             logger.warning(f"{symbol} 补充下方网格失败 Grid-{level}: {e}")
 
-    def _try_extend_grid(self, symbol: str, grid_state: GridState, filled_level: int) -> None:
+    def _try_extend_grid(self, symbol: str, grid_state: GridState, filled_price: float, is_upper: bool) -> None:
         """
-        滚动窗口网格扩展
+        滚动窗口网格扩展（基于价格）
 
         当边界网格成交时，在对侧靠近当前价格的位置添加新网格，同时移除最远端网格
 
         Args:
             symbol: 交易对
             grid_state: 网格状态
-            filled_level: 成交的网格层级（正数=上方，负数=下方）
+            filled_price: 成交的网格价格
+            is_upper: 是否为上方网格
         """
         # 检查是否启用动态扩展
         if not self.config.grid.dynamic_expansion:
@@ -769,62 +794,52 @@ class GridStrategy:
         spacing = self.config.grid.spacing  # 0.015
         max_total_grids = self.config.grid.max_total_grids  # 30
 
-        upper_levels = grid_state.grid_prices.get_upper_levels()
-        lower_levels = grid_state.grid_prices.get_lower_levels()
-        total_grids = len(upper_levels) + len(lower_levels)
+        # 获取当前所有网格价格
+        upper_prices = sorted(grid_state.upper_orders.keys())
+        lower_prices = sorted(grid_state.lower_orders.keys(), reverse=True)
+        total_grids = len(upper_prices) + len(lower_prices)
 
-        # 检查是否触发边界扩展
-        if filled_level > 0:  # 上方网格成交（价格上涨）
-            max_upper = max(upper_levels) if upper_levels else 0
+        if is_upper:  # 上方网格成交（价格上涨）
+            max_upper_price = max(upper_prices) if upper_prices else 0
 
-            if filled_level == max_upper:
+            # 检查是否为边界网格（价格差异小于0.1%）
+            if abs(filled_price - max_upper_price) / max_upper_price < 0.001:
                 # 1. 在上方添加新网格（基于当前价格计算）
-                new_upper_price = current_price * (1 + spacing)
-                new_upper_level = self._calculate_grid_level(new_upper_price, grid_state.entry_price, spacing)
-
-                grid_state.grid_prices.add_level(new_upper_level, new_upper_price)
-                self._place_single_upper_grid(symbol, grid_state, new_upper_level, new_upper_price)
-                logger.info(f"{symbol} 滚动窗口：添加上方网格 Grid+{new_upper_level} @ {new_upper_price:.6f}")
+                new_upper_price = round(current_price * (1 + spacing), 8)
+                self._place_single_upper_grid_by_price(symbol, grid_state, new_upper_price)
+                logger.info(f"{symbol} 滚动窗口：添加上方网格 @ {new_upper_price:.6f}")
 
                 # 2. 在下方添加新网格（靠近当前价格！）
-                new_lower_price = current_price * (1 - spacing)
-                new_lower_level = self._calculate_grid_level(new_lower_price, grid_state.entry_price, spacing)
-
-                grid_state.grid_prices.add_level(new_lower_level, new_lower_price)
-                self._place_single_lower_grid(symbol, grid_state, new_lower_level, new_lower_price)
-                logger.info(f"{symbol} 滚动窗口：添加下方网格 Grid{new_lower_level} @ {new_lower_price:.6f}")
+                new_lower_price = round(current_price * (1 - spacing), 8)
+                self._place_single_lower_grid_by_price(symbol, grid_state, new_lower_price)
+                logger.info(f"{symbol} 滚动窗口：添加下方网格 @ {new_lower_price:.6f}")
 
                 # 3. 如果总数超过30，移除最远的下方网格
-                if total_grids + 2 > max_total_grids and lower_levels:
-                    min_lower = min(lower_levels)
-                    self._remove_grid_level(symbol, grid_state, min_lower)
-                    logger.info(f"{symbol} 移除最远下方网格 Grid{min_lower}")
+                if total_grids + 2 > max_total_grids and lower_prices:
+                    min_lower_price = min(lower_prices)
+                    self._remove_grid_by_price(symbol, grid_state, min_lower_price, is_upper=False)
+                    logger.info(f"{symbol} 移除最远下方网格 @ {min_lower_price:.6f}")
 
-        elif filled_level < 0:  # 下方网格成交（价格下跌）
-            min_lower = min(lower_levels) if lower_levels else 0
+        else:  # 下方网格成交（价格下跌）
+            min_lower_price = min(lower_prices) if lower_prices else float('inf')
 
-            if filled_level == min_lower:
+            # 检查是否为边界网格（价格差异小于0.1%）
+            if abs(filled_price - min_lower_price) / min_lower_price < 0.001:
                 # 1. 在下方添加新网格（基于当前价格计算）
-                new_lower_price = current_price * (1 - spacing)
-                new_lower_level = self._calculate_grid_level(new_lower_price, grid_state.entry_price, spacing)
-
-                grid_state.grid_prices.add_level(new_lower_level, new_lower_price)
-                self._place_single_lower_grid(symbol, grid_state, new_lower_level, new_lower_price)
-                logger.info(f"{symbol} 滚动窗口：添加下方网格 Grid{new_lower_level} @ {new_lower_price:.6f}")
+                new_lower_price = round(current_price * (1 - spacing), 8)
+                self._place_single_lower_grid_by_price(symbol, grid_state, new_lower_price)
+                logger.info(f"{symbol} 滚动窗口：添加下方网格 @ {new_lower_price:.6f}")
 
                 # 2. 在上方添加新网格（靠近当前价格！）
-                new_upper_price = current_price * (1 + spacing)
-                new_upper_level = self._calculate_grid_level(new_upper_price, grid_state.entry_price, spacing)
-
-                grid_state.grid_prices.add_level(new_upper_level, new_upper_price)
-                self._place_single_upper_grid(symbol, grid_state, new_upper_level, new_upper_price)
-                logger.info(f"{symbol} 滚动窗口：添加上方网格 Grid+{new_upper_level} @ {new_upper_price:.6f}")
+                new_upper_price = round(current_price * (1 + spacing), 8)
+                self._place_single_upper_grid_by_price(symbol, grid_state, new_upper_price)
+                logger.info(f"{symbol} 滚动窗口：添加上方网格 @ {new_upper_price:.6f}")
 
                 # 3. 如果总数超过30，移除最远的上方网格
-                if total_grids + 2 > max_total_grids and upper_levels:
-                    max_upper = max(upper_levels)
-                    self._remove_grid_level(symbol, grid_state, max_upper)
-                    logger.info(f"{symbol} 移除最远上方网格 Grid+{max_upper}")
+                if total_grids + 2 > max_total_grids and upper_prices:
+                    max_upper_price = max(upper_prices)
+                    self._remove_grid_by_price(symbol, grid_state, max_upper_price, is_upper=True)
+                    logger.info(f"{symbol} 移除最远上方网格 @ {max_upper_price:.6f}")
 
     def _place_single_upper_grid(self, symbol: str, grid_state: GridState, level: int, price: float) -> None:
         """
@@ -934,6 +949,191 @@ class GridStrategy:
         # 从价格字典中移除
         grid_state.grid_prices.remove_level(level)
 
+    # ==================== 新增：基于价格的网格操作函数 ====================
+
+    def _place_single_upper_grid_by_price(self, symbol: str, grid_state: GridState, price: float) -> None:
+        """
+        挂单个上方网格订单（基于价格）
+
+        Args:
+            symbol: 交易对
+            grid_state: 网格状态
+            price: 价格
+        """
+        try:
+            price = round(price, 8)  # 统一精度
+
+            # 检查是否已存在
+            if price in grid_state.upper_orders:
+                logger.debug(f"{symbol} 上方网格已存在 @ {price:.6f}")
+                return
+
+            grid_margin = self.config.position.grid_margin
+            amount = self._calculate_amount(symbol, grid_margin, price)
+
+            order = self.connector.place_order_with_maker_retry(
+                symbol=symbol,
+                side='sell',  # 开空
+                amount=amount,
+                price=price,
+                order_type='limit',
+                post_only=True,
+                max_retries=5
+            )
+
+            grid_state.upper_orders[price] = order.order_id
+            logger.info(f"{symbol} 成功挂上方网格 @ {price:.6f}, {amount}张")
+
+        except Exception as e:
+            logger.warning(f"{symbol} 挂上方网格失败 @ {price:.6f}: {e}")
+
+    def _place_single_lower_grid_by_price(self, symbol: str, grid_state: GridState, price: float) -> None:
+        """
+        挂单个下方网格订单（基础止盈，基于价格）
+
+        Args:
+            symbol: 交易对
+            grid_state: 网格状态
+            price: 价格
+        """
+        try:
+            price = round(price, 8)  # 统一精度
+
+            # 检查是否已存在
+            if price in grid_state.lower_orders:
+                logger.debug(f"{symbol} 下方网格已存在 @ {price:.6f}")
+                return
+
+            # 仅基础止盈（基础仓位的1/10）
+            base_margin = self.config.position.base_margin
+            amount = self._calculate_amount(symbol, base_margin / 10, grid_state.entry_price)
+
+            order = self._place_position_aware_buy_order(symbol, price, amount)
+
+            if order:
+                grid_state.lower_orders[price] = order.order_id
+                logger.info(f"{symbol} 成功挂下方网格（基础） @ {price:.6f}, {amount}张")
+
+        except Exception as e:
+            logger.warning(f"{symbol} 挂下方网格失败 @ {price:.6f}: {e}")
+
+    def _place_enhanced_lower_grid_by_price(
+        self,
+        symbol: str,
+        grid_state: GridState,
+        price: float,
+        upper_fill: UpperGridFill
+    ) -> None:
+        """
+        挂增强止盈单（基础止盈 + 网格仓位，基于价格）
+
+        Args:
+            symbol: 交易对
+            grid_state: 网格状态
+            price: 价格
+            upper_fill: 对应的上方开仓信息
+        """
+        try:
+            price = round(price, 8)  # 统一精度
+
+            # 计算增强止盈数量：基础仓位1/10 + 网格仓位
+            base_margin = self.config.position.base_margin
+            grid_margin = self.config.position.grid_margin
+            base_amount = self._calculate_amount(symbol, base_margin / 10, grid_state.entry_price)
+            grid_amount = self._calculate_amount(symbol, grid_margin, price)
+            total_amount = base_amount + grid_amount
+
+            logger.debug(f"{symbol} 增强止盈: 基础{base_amount}张 + 网格{grid_amount}张 = {total_amount}张")
+
+            order = self._place_position_aware_buy_order(symbol, price, total_amount)
+
+            if order:
+                grid_state.lower_orders[price] = order.order_id
+                logger.info(f"{symbol} 成功挂增强止盈单 @ {price:.6f}, {total_amount}张")
+
+        except Exception as e:
+            logger.warning(f"{symbol} 挂增强止盈单失败 @ {price:.6f}: {e}")
+
+    def _remove_grid_by_price(self, symbol: str, grid_state: GridState, price: float, is_upper: bool) -> None:
+        """
+        移除指定价格的网格（撤单）
+
+        Args:
+            symbol: 交易对
+            grid_state: 网格状态
+            price: 要移除的网格价格
+            is_upper: 是否为上方网格
+        """
+        price = round(price, 8)  # 统一精度
+
+        if is_upper and price in grid_state.upper_orders:
+            try:
+                order_id = grid_state.upper_orders[price]
+                self.connector.cancel_order(order_id, symbol)
+                del grid_state.upper_orders[price]
+                logger.info(f"{symbol} 已撤销上方网格 @ {price:.6f}")
+            except Exception as e:
+                logger.warning(f"{symbol} 撤销上方网格失败 @ {price:.6f}: {e}")
+
+        elif not is_upper and price in grid_state.lower_orders:
+            try:
+                order_id = grid_state.lower_orders[price]
+                self.connector.cancel_order(order_id, symbol)
+                del grid_state.lower_orders[price]
+                logger.info(f"{symbol} 已撤销下方网格 @ {price:.6f}")
+            except Exception as e:
+                logger.warning(f"{symbol} 撤销下方网格失败 @ {price:.6f}: {e}")
+
+    # ==================== 结束：基于价格的网格操作函数 ====================
+
+    def _check_base_position_health(self, symbol: str, grid_state: GridState) -> None:
+        """
+        检查基础仓位健康度
+
+        Args:
+            symbol: 交易对
+            grid_state: 网格状态
+        """
+        try:
+            # 查询当前持仓
+            positions = self.connector.query_positions()
+            short_position = next((p for p in positions if p.symbol == symbol and p.contracts < 0), None)
+
+            if not short_position:
+                logger.warning(f"{symbol} 基础仓位已完全平仓！")
+                return
+
+            current_amount = abs(short_position.contracts)
+
+            # 计算预期的基础仓位
+            base_margin = self.config.position.base_margin
+            expected_base = self._calculate_amount(symbol, base_margin, grid_state.entry_price)
+
+            # 计算最小仓位
+            min_ratio = self.config.position.min_base_position_ratio
+            min_base = expected_base * min_ratio
+
+            # 计算当前比例
+            current_ratio = current_amount / expected_base
+
+            if current_amount < min_base:
+                logger.error(
+                    f"{symbol} 基础仓位过低！"
+                    f"当前: {current_amount:.1f}张 ({current_ratio*100:.1f}%), "
+                    f"最小: {min_base:.1f}张 ({min_ratio*100:.0f}%)"
+                )
+            elif current_ratio < 0.5:
+                logger.warning(
+                    f"{symbol} 基础仓位偏低: {current_amount:.1f}张 ({current_ratio*100:.1f}%)"
+                )
+            else:
+                logger.debug(
+                    f"{symbol} 基础仓位健康: {current_amount:.1f}张 ({current_ratio*100:.1f}%)"
+                )
+
+        except Exception as e:
+            logger.error(f"{symbol} 检查基础仓位失败: {e}")
+
     def update_grid_states(self) -> None:
         """更新所有网格状态"""
         for symbol, grid_state in self.grid_states.items():
@@ -945,11 +1145,14 @@ class GridStrategy:
                 if grid_state.grid_integrity_validated:
                     self._repair_missing_grids(symbol, grid_state)
 
+                # 新增：检查基础仓位健康度
+                self._check_base_position_health(symbol, grid_state)
+
             except Exception as e:
                 logger.error(f"更新网格状态失败 {symbol}: {e}")
 
     def _update_single_grid(self, symbol: str, grid_state: GridState) -> None:
-        """更新单个网格状态"""
+        """更新单个网格状态（基于价格）"""
         # 查询所有订单
         orders = {order.order_id: order for order in self.connector.query_open_orders(symbol)}
 
@@ -963,72 +1166,70 @@ class GridStrategy:
                 logger.info(f"检测到基础仓位已成交，挂分层止盈单: {symbol}")
                 self._place_base_position_take_profit(symbol, grid_state)
 
-        # 检查上方网格订单
-        for level, order_id in list(grid_state.upper_orders.items()):
+        # 检查上方网格订单（基于价格）
+        for price, order_id in list(grid_state.upper_orders.items()):
             order = orders.get(order_id)
 
             if not order or order.status == 'filled':
                 # 订单成交
-                logger.info(f"上方网格成交: {symbol} Grid+{level}")
-                grid_state.filled_grids.add(level)
-                del grid_state.upper_orders[level]
+                logger.info(f"上方网格成交: {symbol} @ {price:.6f}")
+
+                # 记录成交信息
+                fill_info = UpperGridFill(
+                    price=price,
+                    amount=order.amount if order else 0,
+                    fill_time=datetime.now(timezone.utc),
+                    order_id=order_id,
+                    matched_lower_price=round(price * (1 - 2 * self.config.grid.spacing), 8)  # 预期的止盈价格
+                )
+                grid_state.filled_upper_grids[order_id] = fill_info
+                del grid_state.upper_orders[price]
 
                 # 撤销对应的下方止盈单（如果存在）
-                if level in grid_state.lower_orders:
-                    old_order_id = grid_state.lower_orders[level]
+                matched_lower_price = fill_info.matched_lower_price
+                if matched_lower_price in grid_state.lower_orders:
+                    old_order_id = grid_state.lower_orders[matched_lower_price]
                     try:
                         self.connector.cancel_order(old_order_id, symbol)
-                        logger.info(f"撤销旧止盈单: Grid-{level}")
+                        logger.info(f"撤销旧止盈单 @ {matched_lower_price:.6f}")
                     except Exception as e:
                         logger.warning(f"撤单失败: {e}")
 
-                # 挂新的止盈单（数量=基础仓位1/10 + 网格仓位）
-                self._place_enhanced_lower_grid_order(symbol, grid_state, level)
+                # 挂新的增强止盈单
+                self._place_enhanced_lower_grid_by_price(symbol, grid_state, matched_lower_price, fill_info)
 
-                # 新增：尝试扩展网格（移动网格策略）
-                self._try_extend_grid(symbol, grid_state, level)
+                # 尝试扩展网格
+                self._try_extend_grid(symbol, grid_state, price, is_upper=True)
 
-        # 检查下方网格订单
-        for level, order_id in list(grid_state.lower_orders.items()):
+        # 检查下方网格订单（基于价格）
+        for price, order_id in list(grid_state.lower_orders.items()):
             order = orders.get(order_id)
 
             if not order or order.status == 'filled':
-                # 订单成交(平空止盈)
-                logger.info(f"下方网格成交: {symbol} Grid{level}")
+                # 订单成交（止盈）
+                logger.info(f"下方网格成交: {symbol} @ {price:.6f}")
 
-                # 1. 判断之前是否有对应的上方仓位成交
-                opposite_level = abs(level)
-                had_upper_position = opposite_level in grid_state.filled_grids
+                # 查找匹配的上方开仓
+                matched_fill = self._find_matched_upper_fill(grid_state, price)
 
-                # 2. 移除成交记录和订单
-                grid_state.filled_grids.discard(opposite_level)
-                del grid_state.lower_orders[level]
+                if matched_fill:
+                    # 完整循环：恢复网格
+                    profit_pct = (matched_fill.price - price) / matched_fill.price * 100
+                    logger.info(f"完整循环: 开仓 @ {matched_fill.price:.6f}, 平仓 @ {price:.6f}, 盈利 {profit_pct:.2f}%")
 
-                # 3. 如果之前有上方仓位成交，需要恢复网格（防止网格退化）
-                if had_upper_position:
-                    logger.info(f"检测到完整循环，恢复网格: Grid±{opposite_level}")
+                    # 恢复上方网格
+                    self._place_single_upper_grid_by_price(symbol, grid_state, matched_fill.price)
 
-                    # 3a. 重新挂上方开空订单
-                    upper_price = grid_state.grid_prices.grid_levels.get(opposite_level)
-                    if upper_price:
-                        logger.info(f"恢复上方网格: Grid+{opposite_level} @ {upper_price:.8f}")
-                        try:
-                            self._place_single_upper_grid(symbol, grid_state, opposite_level, upper_price)
-                        except Exception as e:
-                            logger.warning(f"恢复上方网格失败 Grid+{opposite_level}: {e}")
+                    # 恢复下方基础止盈单
+                    self._place_lower_grid_by_price(symbol, grid_state, price)
 
-                    # 3b. 重新挂下方基础止盈单
-                    lower_price = grid_state.grid_prices.grid_levels.get(level)
-                    if lower_price:
-                        logger.info(f"恢复下方基础止盈: Grid{level} @ {lower_price:.8f}")
-                        try:
-                            self._place_lower_grid_order(symbol, grid_state, level)
-                        except Exception as e:
-                            logger.warning(f"恢复下方止盈失败 Grid{level}: {e}")
+                    # 移除成交记录
+                    del grid_state.filled_upper_grids[matched_fill.order_id]
 
-                # 4. 移动网格策略：尝试扩展网格
-                # 当下方边界网格成交时，会在下方添加新网格，上方移除最远网格
-                self._try_extend_grid(symbol, grid_state, level)
+                del grid_state.lower_orders[price]
+
+                # 尝试扩展网格
+                self._try_extend_grid(symbol, grid_state, price, is_upper=False)
 
         grid_state.last_update = datetime.now(timezone.utc)
 
@@ -1180,3 +1381,90 @@ class GridStrategy:
             # 下方网格
             level = round(math.log(price / entry_price) / math.log(1 - spacing))
             return min(-1, level)  # 至少为-1
+
+    def _place_position_aware_buy_order(
+        self,
+        symbol: str,
+        price: float,
+        desired_amount: float
+    ) -> Optional[Order]:
+        """
+        仓位感知的买单（绕过 reduce_only 限制）
+
+        Args:
+            symbol: 交易对
+            price: 价格
+            desired_amount: 期望数量
+
+        Returns:
+            订单对象，如果无法下单则返回 None
+        """
+        # 1. 查询当前持仓
+        try:
+            positions = self.connector.query_positions()
+            short_position = next((p for p in positions if p.symbol == symbol and p.contracts < 0), None)
+
+            if not short_position:
+                logger.warning(f"{symbol} 没有空头仓位，跳过买单")
+                return None
+
+            short_amount = abs(short_position.contracts)
+
+            # 2. 计算实际可以平仓的数量
+            actual_amount = min(desired_amount, short_amount)
+
+            if actual_amount < desired_amount * 0.9:  # 如果实际数量小于期望的90%
+                logger.warning(f"{symbol} 空头仓位不足: 期望 {desired_amount:.2f}, 实际 {short_amount:.2f}, 下单 {actual_amount:.2f}")
+
+            # 3. 下单（不使用 reduce_only）
+            order = self.connector.place_order_with_maker_retry(
+                symbol=symbol,
+                side='buy',
+                amount=actual_amount,
+                price=price,
+                order_type='limit',
+                post_only=True,
+                max_retries=5
+            )
+            return order
+
+        except Exception as e:
+            logger.error(f"{symbol} 仓位感知买单失败: {e}")
+            return None
+
+    def _find_matched_upper_fill(
+        self,
+        grid_state: GridState,
+        lower_price: float
+    ) -> Optional[UpperGridFill]:
+        """
+        查找匹配的上方开仓
+
+        Args:
+            grid_state: 网格状态
+            lower_price: 下方成交价格
+
+        Returns:
+            匹配的上方开仓信息，如果没有则返回 None
+        """
+        if not grid_state.filled_upper_grids:
+            return None
+
+        # 查找 matched_lower_price 最接近 lower_price 的上方开仓
+        best_match = None
+        min_diff = float('inf')
+
+        for fill_info in grid_state.filled_upper_grids.values():
+            if fill_info.matched_lower_price is None:
+                continue
+
+            diff = abs(fill_info.matched_lower_price - lower_price)
+            if diff < min_diff:
+                min_diff = diff
+                best_match = fill_info
+
+        # 如果差异小于 0.5%，认为是匹配的
+        if best_match and min_diff / lower_price < 0.005:
+            return best_match
+
+        return None

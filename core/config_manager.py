@@ -55,6 +55,7 @@ class PositionConfig:
     base_margin: float          # 基础仓位保证金
     grid_margin: float          # 单网格保证金
     manual_symbols: List[str] = field(default_factory=list)  # 手动指定必开币种
+    min_base_position_ratio: float = 0.3  # 最小保留基础仓位比例（默认30%）
     # single_symbol_max: 已移除,改为动态计算
     # total_margin_limit: 已移除,改为动态计算
 

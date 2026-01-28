@@ -6,6 +6,7 @@ Grid Strategy Module
 """
 
 import math
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set
@@ -508,6 +509,14 @@ class GridStrategy:
             except Exception as e:
                 logger.warning(f"挂基础止盈单失败 @ {price:.6f}: {e}")
 
+        # 统计挂单成功率
+        success_count = len(grid_state.lower_orders)
+        logger.info(f"止盈单挂单完成: {success_count}/{allowed_levels}个成功")
+        if success_count < allowed_levels:
+            logger.error(f"⚠️ 止盈单挂单不完整！预期{allowed_levels}个，实际{success_count}个")
+        elif success_count == 0:
+            logger.error(f"⚠️ 严重错误：没有任何止盈单被成功挂出！")
+
     def _place_lower_grid_order(self, symbol: str, grid_state: GridState, level: int) -> None:
         """挂下方网格订单(平空) - 仅用于重新挂上方成交前的基础止盈单"""
         if level not in grid_state.grid_prices.grid_levels:
@@ -592,7 +601,7 @@ class GridStrategy:
 
     def _should_check_grid_repair(self, grid_state: GridState) -> bool:
         """
-        判断是否应该检查网格修复（至少间隔10秒）
+        判断是否应该检查网格修复（正常间隔10秒，恢复模式2秒）
 
         Args:
             grid_state: 网格状态
@@ -605,7 +614,12 @@ class GridStrategy:
 
         now = datetime.now(timezone.utc)
         elapsed = (now - grid_state.last_repair_check).total_seconds()
-        return elapsed >= self.config.grid.repair_interval
+
+        # 恢复模式：如果完全没有止盈单，使用更短的间隔（2秒）
+        is_recovery = len(grid_state.lower_orders) == 0
+        repair_interval = 2 if is_recovery else self.config.grid.repair_interval
+
+        return elapsed >= repair_interval
 
     def _repair_missing_grids(self, symbol: str, grid_state: GridState) -> None:
         """
@@ -683,14 +697,21 @@ class GridStrategy:
                     self._place_single_upper_grid_by_price(symbol, grid_state, target_price)
 
         # 修复下方网格（检查所有预期的网格价格）
+        # 检查是否处于恢复场景（完全没有止盈单）
+        is_recovery = len(grid_state.lower_orders) == 0
+
         for level in grid_state.grid_prices.get_lower_levels():
             target_price = round(grid_state.grid_prices.grid_levels[level], 8)
 
             # 检查是否缺失
             if target_price not in grid_state.lower_orders:
-                # 只有当市价高于目标价时才补充平空止盈单
-                if current_price > target_price:
-                    logger.info(f"{symbol} 补充缺失的下方网格 @ {target_price:.6f}")
+                # 在恢复场景下，无论价格如何都补充止盈单
+                # 在正常场景下，只有当市价高于目标价时才补充
+                if is_recovery or current_price > target_price:
+                    if is_recovery:
+                        logger.info(f"{symbol} [恢复模式] 补充缺失的下方网格 @ {target_price:.6f}")
+                    else:
+                        logger.info(f"{symbol} 补充缺失的下方网格 @ {target_price:.6f}")
                     self._place_single_lower_grid_by_price(symbol, grid_state, target_price)
 
     def _repair_single_upper_grid(self, symbol: str, grid_state: GridState, level: int, price: float) -> None:
@@ -1353,7 +1374,13 @@ class GridStrategy:
 
                 # 补充缺失的订单
                 missing_upper = len(grid_state.grid_prices.get_upper_levels()) - len(grid_state.upper_orders)
-                missing_lower = len(grid_state.grid_prices.get_lower_levels()) - len(grid_state.lower_orders)
+
+                # 计算允许的止盈单数量（考虑最小仓位保护）
+                min_ratio = self.config.position.min_base_position_ratio
+                closeable_ratio = 1.0 - min_ratio
+                total_lower_levels = len(grid_state.grid_prices.get_lower_levels())
+                allowed_lower_levels = int(total_lower_levels * closeable_ratio)  # 例如：10 × 0.7 = 7
+                missing_lower = allowed_lower_levels - len(grid_state.lower_orders)
 
                 if missing_upper > 0:
                     logger.info(f"检测到{missing_upper}个缺失的上方网格订单，开始补充...")
@@ -1362,6 +1389,7 @@ class GridStrategy:
                 if missing_lower > 0:
                     logger.info(f"检测到{missing_lower}个缺失的下方网格订单，开始补充...")
                     self._place_base_position_take_profit(symbol, grid_state)
+                    logger.info(f"恢复后止盈单数量: {len(grid_state.lower_orders)}/{allowed_lower_levels}")
 
                 # 标记网格为已验证（允许后续修复机制运行）
                 grid_state.grid_integrity_validated = True
@@ -1401,6 +1429,42 @@ class GridStrategy:
 
         return amount
 
+    def _place_lower_grid_without_position_check(
+        self,
+        symbol: str,
+        price: float,
+        amount: float
+    ) -> Optional[Order]:
+        """
+        应急模式：不检查仓位直接挂止盈单
+
+        当仓位查询失败但我们确信仓位存在时使用此方法。
+        不使用 reduce_only，允许订单成交。
+
+        Args:
+            symbol: 交易对
+            price: 价格
+            amount: 数量
+
+        Returns:
+            订单对象，如果下单失败则返回 None
+        """
+        try:
+            logger.warning(f"{symbol} 使用应急模式挂止盈单 @ {price:.6f}, {amount}张")
+            order = self.connector.place_order_with_maker_retry(
+                symbol=symbol,
+                side='buy',
+                amount=amount,
+                price=price,
+                order_type='limit',
+                post_only=True,
+                max_retries=5
+            )
+            return order
+        except Exception as e:
+            logger.error(f"{symbol} 应急模式下单失败: {e}")
+            return None
+
     def _calculate_grid_level(self, price: float, entry_price: float, spacing: float) -> int:
         """
         根据价格计算网格层级
@@ -1426,7 +1490,8 @@ class GridStrategy:
         self,
         symbol: str,
         price: float,
-        desired_amount: float
+        desired_amount: float,
+        max_retries: int = 3
     ) -> Optional[Order]:
         """
         仓位感知的买单（绕过 reduce_only 限制）
@@ -1435,35 +1500,62 @@ class GridStrategy:
             symbol: 交易对
             price: 价格
             desired_amount: 期望数量
+            max_retries: 最大重试次数（默认3次）
 
         Returns:
             订单对象，如果无法下单则返回 None
         """
-        # 1. 查询当前持仓
+        short_position = None
+
+        # 1. 查询当前持仓（带重试机制）
+        for attempt in range(max_retries):
+            try:
+                positions = self.connector.query_positions()
+
+                # 调试日志：显示所有持仓
+                logger.debug(f"当前持仓数量: {len(positions)}")
+                for p in positions:
+                    logger.debug(f"  {p.symbol}: side={p.side}, contracts={p.contracts}, size={p.size}")
+
+                # 使用 side 字段来判断空头仓位（更可靠）
+                short_position = next((p for p in positions if p.symbol == symbol and p.side == 'short'), None)
+
+                if short_position:
+                    # 找到空头仓位，跳出重试循环
+                    break
+
+                # 未找到空头仓位
+                if attempt < max_retries - 1:
+                    logger.warning(f"{symbol} 未检测到空头仓位，重试 {attempt+1}/{max_retries}")
+                    time.sleep(1)  # 等待1秒后重试
+                else:
+                    logger.error(f"{symbol} 多次重试后仍未检测到空头仓位（当前持仓: {[p.symbol for p in positions]}）")
+                    logger.warning(f"{symbol} 启用应急模式，尝试直接下单")
+                    return self._place_lower_grid_without_position_check(symbol, price, desired_amount)
+
+            except Exception as e:
+                logger.error(f"{symbol} 查询持仓失败 (尝试 {attempt+1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+                else:
+                    logger.warning(f"{symbol} 查询持仓多次失败，启用应急模式")
+                    return self._place_lower_grid_without_position_check(symbol, price, desired_amount)
+
+        # 2. 验证找到了空头仓位
+        if not short_position:
+            logger.warning(f"{symbol} 未找到空头仓位，启用应急模式")
+            return self._place_lower_grid_without_position_check(symbol, price, desired_amount)
+
         try:
-            positions = self.connector.query_positions()
-
-            # 调试日志：显示所有持仓
-            logger.debug(f"当前持仓数量: {len(positions)}")
-            for p in positions:
-                logger.debug(f"  {p.symbol}: side={p.side}, contracts={p.contracts}, size={p.size}")
-
-            # 使用 side 字段来判断空头仓位（更可靠）
-            short_position = next((p for p in positions if p.symbol == symbol and p.side == 'short'), None)
-
-            if not short_position:
-                logger.warning(f"{symbol} 没有空头仓位，跳过买单（当前持仓: {[p.symbol for p in positions]}）")
-                return None
-
             short_amount = short_position.size  # 使用 size 字段（总是正数）
 
-            # 2. 计算实际可以平仓的数量
+            # 3. 计算实际可以平仓的数量
             actual_amount = min(desired_amount, short_amount)
 
             if actual_amount < desired_amount * 0.9:  # 如果实际数量小于期望的90%
                 logger.warning(f"{symbol} 空头仓位不足: 期望 {desired_amount:.2f}, 实际 {short_amount:.2f}, 下单 {actual_amount:.2f}")
 
-            # 3. 下单（不使用 reduce_only）
+            # 4. 下单（不使用 reduce_only）
             order = self.connector.place_order_with_maker_retry(
                 symbol=symbol,
                 side='buy',

@@ -123,6 +123,15 @@ class GridStrategy:
         # 网格状态字典: symbol -> GridState
         self.grid_states: Dict[str, GridState] = {}
 
+        # 仓位缓存，减少API调用频率: symbol -> (Position, timestamp)
+        from .exchange_connector import Position
+        self._position_cache: Dict[str, tuple] = {}
+        self._cache_ttl = 5  # 缓存TTL (秒)
+
+        # 对账时间戳: symbol -> datetime
+        self._last_reconciliation: Dict[str, datetime] = {}
+        self._reconciliation_interval = 60  # 对账间隔 (秒)
+
         logger.info("网格策略执行器初始化完成")
 
     def calculate_grid_prices(self, entry_price: float) -> GridPrices:
@@ -791,9 +800,9 @@ class GridStrategy:
 
     def _try_extend_grid(self, symbol: str, grid_state: GridState, filled_price: float, is_upper: bool) -> None:
         """
-        滚动窗口网格扩展（基于价格）
+        滚动窗口网格扩展（修复版 - 保持平衡）
 
-        当边界网格成交时，在对侧靠近当前价格的位置添加新网格，同时移除最远端网格
+        当边界网格成交时，在同侧添加新网格，在对侧移除最远网格，保持上下平衡
 
         Args:
             symbol: 交易对
@@ -825,42 +834,36 @@ class GridStrategy:
 
             # 检查是否为边界网格（价格差异小于0.1%）
             if abs(filled_price - max_upper_price) / max_upper_price < 0.001:
-                # 1. 在上方添加新网格（基于当前价格计算）
+                # 1. 在上方添加新网格（更高价格 - 增加开空容量）
                 new_upper_price = round(current_price * (1 + spacing), 8)
                 self._place_single_upper_grid_by_price(symbol, grid_state, new_upper_price)
                 logger.info(f"{symbol} 滚动窗口：添加上方网格 @ {new_upper_price:.6f}")
 
-                # 2. 在下方添加新网格（靠近当前价格！）
-                new_lower_price = round(current_price * (1 - spacing), 8)
-                self._place_single_lower_grid_by_price(symbol, grid_state, new_lower_price)
-                logger.info(f"{symbol} 滚动窗口：添加下方网格 @ {new_lower_price:.6f}")
-
-                # 3. 如果总数超过30，移除最远的下方网格
-                if total_grids + 2 > max_total_grids and lower_prices:
+                # 2. 移除最远的下方网格（减少止盈容量 - 保持平衡）
+                if lower_prices:
                     min_lower_price = min(lower_prices)
                     self._remove_grid_by_price(symbol, grid_state, min_lower_price, is_upper=False)
-                    logger.info(f"{symbol} 移除最远下方网格 @ {min_lower_price:.6f}")
+                    logger.info(f"{symbol} 滚动窗口：移除最远下方网格 @ {min_lower_price:.6f} (保持平衡)")
+
+                # NET: +1 short capacity, -1 take-profit capacity (BALANCED)
 
         else:  # 下方网格成交（价格下跌）
             min_lower_price = min(lower_prices) if lower_prices else float('inf')
 
             # 检查是否为边界网格（价格差异小于0.1%）
             if abs(filled_price - min_lower_price) / min_lower_price < 0.001:
-                # 1. 在下方添加新网格（基于当前价格计算）
+                # 1. 在下方添加新网格（更低价格 - 增加止盈容量）
                 new_lower_price = round(current_price * (1 - spacing), 8)
                 self._place_single_lower_grid_by_price(symbol, grid_state, new_lower_price)
                 logger.info(f"{symbol} 滚动窗口：添加下方网格 @ {new_lower_price:.6f}")
 
-                # 2. 在上方添加新网格（靠近当前价格！）
-                new_upper_price = round(current_price * (1 + spacing), 8)
-                self._place_single_upper_grid_by_price(symbol, grid_state, new_upper_price)
-                logger.info(f"{symbol} 滚动窗口：添加上方网格 @ {new_upper_price:.6f}")
-
-                # 3. 如果总数超过30，移除最远的上方网格
-                if total_grids + 2 > max_total_grids and upper_prices:
+                # 2. 移除最远的上方网格（减少开空容量 - 保持平衡）
+                if upper_prices:
                     max_upper_price = max(upper_prices)
                     self._remove_grid_by_price(symbol, grid_state, max_upper_price, is_upper=True)
-                    logger.info(f"{symbol} 移除最远上方网格 @ {max_upper_price:.6f}")
+                    logger.info(f"{symbol} 滚动窗口：移除最远上方网格 @ {max_upper_price:.6f} (保持平衡)")
+
+                # NET: +1 take-profit capacity, -1 short capacity (BALANCED)
 
     def _place_single_upper_grid(self, symbol: str, grid_state: GridState, level: int, price: float) -> None:
         """
@@ -1029,6 +1032,20 @@ class GridStrategy:
             base_margin = self.config.position.base_margin
             amount = self._calculate_amount(symbol, base_margin / 10, grid_state.entry_price)
 
+            # 验证总仓位不会超限
+            is_safe, safe_amount, warning = self._validate_total_exposure_before_buy_order(
+                symbol, grid_state, amount
+            )
+
+            if not is_safe:
+                logger.error(f"{symbol} ⚠️ 拒绝挂下方网格 @ {price:.6f}: {warning}")
+                return
+
+            if safe_amount < amount:
+                logger.info(f"{symbol} 调整下方网格数量: {amount:.2f} → {safe_amount:.2f}张")
+                amount = safe_amount
+
+            # 使用仓位感知买单
             order = self._place_position_aware_buy_order(symbol, price, amount)
 
             if order:
@@ -1065,6 +1082,19 @@ class GridStrategy:
             total_amount = base_amount + grid_amount
 
             logger.debug(f"{symbol} 增强止盈: 基础{base_amount}张 + 网格{grid_amount}张 = {total_amount}张")
+
+            # 验证总仓位不会超限
+            is_safe, safe_amount, warning = self._validate_total_exposure_before_buy_order(
+                symbol, grid_state, total_amount
+            )
+
+            if not is_safe:
+                logger.error(f"{symbol} ⚠️ 拒绝挂增强止盈单 @ {price:.6f}: {warning}")
+                return
+
+            if safe_amount < total_amount:
+                logger.warning(f"{symbol} 调整增强止盈数量: {total_amount:.2f} → {safe_amount:.2f}张")
+                total_amount = safe_amount
 
             order = self._place_position_aware_buy_order(symbol, price, total_amount)
 
@@ -1159,14 +1189,20 @@ class GridStrategy:
         """更新所有网格状态"""
         for symbol, grid_state in self.grid_states.items():
             try:
-                # 原有逻辑：检查订单成交
+                # 0. 断言检查：不允许多头仓位（每次都检查）
+                self._assert_no_long_positions(symbol)
+
+                # 1. 原有逻辑：检查订单成交
                 self._update_single_grid(symbol, grid_state)
 
-                # 新增：检查并修复缺失的网格
+                # 2. 新增：检查并修复缺失的网格
                 if grid_state.grid_integrity_validated:
                     self._repair_missing_grids(symbol, grid_state)
 
-                # 新增：检查基础仓位健康度
+                # 3. 新增：定期对账（60秒间隔）
+                self._reconcile_position_with_grids(symbol, grid_state)
+
+                # 4. 新增：检查基础仓位健康度
                 self._check_base_position_health(symbol, grid_state)
 
             except Exception as e:
@@ -1429,41 +1465,274 @@ class GridStrategy:
 
         return amount
 
-    def _place_lower_grid_without_position_check(
-        self,
-        symbol: str,
-        price: float,
-        amount: float
-    ) -> Optional[Order]:
+    def _get_cached_short_position(self, symbol: str, force_refresh: bool = False):
         """
-        应急模式：不检查仓位直接挂止盈单
-
-        当仓位查询失败但我们确信仓位存在时使用此方法。
-        不使用 reduce_only，允许订单成交。
+        获取缓存的空头仓位（减少API调用）
 
         Args:
             symbol: 交易对
-            price: 价格
-            amount: 数量
+            force_refresh: 是否强制刷新（忽略缓存）
 
         Returns:
-            订单对象，如果下单失败则返回 None
+            Position对象，如果找不到则返回None
+        """
+        now = datetime.now(timezone.utc)
+
+        # 检查缓存
+        if not force_refresh and symbol in self._position_cache:
+            cached_pos, timestamp = self._position_cache[symbol]
+            age = (now - timestamp).total_seconds()
+
+            if age < self._cache_ttl:
+                logger.debug(f"{symbol} 使用缓存仓位 (缓存年龄: {age:.1f}秒)")
+                return cached_pos
+
+        # 缓存失效或不存在，查询新数据
+        try:
+            positions = self.connector.query_positions()
+
+            # 查找空头仓位（使用side字段，更可靠）
+            short_pos = next((p for p in positions if p.symbol == symbol and p.side == 'short'), None)
+
+            if short_pos:
+                # 更新缓存
+                self._position_cache[symbol] = (short_pos, now)
+                logger.debug(f"{symbol} 刷新仓位缓存: {short_pos.size}张 @ {short_pos.entry_price}")
+                return short_pos
+            else:
+                logger.warning(f"{symbol} 未找到空头仓位")
+                return None
+
+        except Exception as e:
+            logger.error(f"{symbol} 查询仓位失败: {e}")
+
+            # 如果查询失败，尝试返回过期缓存（总比没有好）
+            if symbol in self._position_cache:
+                cached_pos, timestamp = self._position_cache[symbol]
+                age = (now - timestamp).total_seconds()
+                logger.warning(f"{symbol} 使用过期缓存 (缓存年龄: {age:.1f}秒)")
+                return cached_pos
+
+            return None
+
+
+    def _validate_total_exposure_before_buy_order(
+        self,
+        symbol: str,
+        grid_state: GridState,
+        new_order_amount: float
+    ) -> tuple:
+        """
+        验证新买单不会导致总买单超过空头仓位
+
+        Args:
+            symbol: 交易对
+            grid_state: 网格状态
+            new_order_amount: 新订单数量
+
+        Returns:
+            tuple[bool, float, str]: (是否安全, 安全数量, 警告信息)
+        """
+        # 1. 获取当前空头仓位
+        short_position = self._get_cached_short_position(symbol)
+
+        if not short_position:
+            return False, 0.0, "无法查询空头仓位"
+
+        current_short_size = short_position.size
+
+        # 2. 计算所有pending下方买单的总数量
+        pending_lower_total = 0.0
+
+        try:
+            # 查询所有挂单
+            open_orders = self.connector.query_open_orders(symbol)
+            open_order_map = {order.order_id: order for order in open_orders}
+
+            # 统计所有下方买单
+            for price, order_id in grid_state.lower_orders.items():
+                order = open_order_map.get(order_id)
+                if order and order.side == 'buy':
+                    pending_lower_total += order.amount
+
+            logger.debug(
+                f"{symbol} 仓位验证: 空头={current_short_size:.2f}张, "
+                f"pending买单={pending_lower_total:.2f}张, "
+                f"新订单={new_order_amount:.2f}张"
+            )
+
+        except Exception as e:
+            logger.error(f"{symbol} 查询挂单失败: {e}")
+            # 保守策略：如果无法查询挂单，假设pending总量为0
+            pending_lower_total = 0.0
+
+        # 3. 计算可用容量
+        available_capacity = current_short_size - pending_lower_total
+
+        # 4. 计算安全数量
+        safe_amount = min(new_order_amount, available_capacity)
+
+        # 5. 检查安全性
+        ratio = (pending_lower_total + safe_amount) / current_short_size if current_short_size > 0 else 0
+
+        if safe_amount < new_order_amount * 0.9:
+            warning = (
+                f"下方网格容量不足: 可用={available_capacity:.2f}/{current_short_size:.2f}张, "
+                f"期望={new_order_amount:.2f}张, 安全={safe_amount:.2f}张 ({ratio*100:.1f}%)"
+            )
+            logger.warning(f"{symbol} {warning}")
+            return False, safe_amount, warning
+
+        elif ratio > 0.90:
+            warning = f"下方网格接近饱和: {ratio*100:.1f}%"
+            logger.warning(f"{symbol} {warning}")
+            return True, safe_amount, warning
+
+        else:
+            return True, safe_amount, ""
+
+
+    def _reconcile_position_with_grids(self, symbol: str, grid_state: GridState) -> None:
+        """
+        定期对账：验证持仓与网格状态一致
+
+        每60秒运行一次，检查：
+        1. 当前空头仓位大小
+        2. 所有pending lower order总额
+        3. 如果lower总额 > 空头仓位 * 0.95: 触发警报并撤销最远的lower订单
+
+        Args:
+            symbol: 交易对
+            grid_state: 网格状态
+        """
+        now = datetime.now(timezone.utc)
+
+        # 检查是否需要对账（60秒间隔）
+        if symbol in self._last_reconciliation:
+            elapsed = (now - self._last_reconciliation[symbol]).total_seconds()
+            if elapsed < self._reconciliation_interval:
+                return
+
+        self._last_reconciliation[symbol] = now
+
+        # 1. 获取当前空头仓位
+        short_position = self._get_cached_short_position(symbol, force_refresh=True)
+
+        if not short_position:
+            logger.critical(f"{symbol} ⚠️ CRITICAL: 对账失败 - 无法找到空头仓位！")
+            return
+
+        short_size = short_position.size
+
+        # 2. 统计所有下方买单的总数量
+        total_lower_amount = 0.0
+        lower_order_count = 0
+
+        try:
+            open_orders = self.connector.query_open_orders(symbol)
+            open_order_map = {order.order_id: order for order in open_orders}
+
+            for price, order_id in grid_state.lower_orders.items():
+                order = open_order_map.get(order_id)
+                if order and order.side == 'buy':
+                    total_lower_amount += order.amount
+                    lower_order_count += 1
+
+        except Exception as e:
+            logger.error(f"{symbol} 对账时查询挂单失败: {e}")
+            return
+
+        # 3. 计算平衡比例
+        ratio = total_lower_amount / short_size if short_size > 0 else 0
+
+        # 4. 检查平衡状态
+        if ratio > 0.95:
+            # 危险：下方买单即将超过空头仓位
+            logger.error(
+                f"{symbol} ⚠️ IMBALANCE DETECTED! "
+                f"下方买单={total_lower_amount:.2f}张 ({lower_order_count}个订单), "
+                f"空头仓位={short_size:.2f}张, "
+                f"比例={ratio*100:.1f}%"
+            )
+
+            # 应急处理：撤销最远的下方网格
+            if grid_state.lower_orders:
+                furthest_lower_price = min(grid_state.lower_orders.keys())
+                logger.warning(
+                    f"{symbol} 应急措施：撤销最远下方网格 @ {furthest_lower_price:.6f} "
+                    "以防止超限"
+                )
+                self._remove_grid_by_price(symbol, grid_state, furthest_lower_price, is_upper=False)
+
+        elif ratio > 0.85:
+            # 警告：下方买单接近上限
+            logger.warning(
+                f"{symbol} 下方买单接近上限: "
+                f"{total_lower_amount:.2f}/{short_size:.2f}张 ({ratio*100:.1f}%)"
+            )
+
+        else:
+            # 健康状态
+            logger.info(
+                f"{symbol} 仓位平衡健康: "
+                f"下方买单={total_lower_amount:.2f}张 ({lower_order_count}个), "
+                f"空头仓位={short_size:.2f}张, "
+                f"比例={ratio*100:.1f}%"
+            )
+
+
+    def _assert_no_long_positions(self, symbol: str) -> bool:
+        """
+        断言检查：绝对不允许多头仓位存在
+
+        如果检测到多头：
+        1. 记录CRITICAL日志
+        2. 立即撤销所有下方买单
+        3. 触发告警通知
+
+        Args:
+            symbol: 交易对
+
+        Returns:
+            bool: 是否检测到多头仓位（True = 检测到）
         """
         try:
-            logger.warning(f"{symbol} 使用应急模式挂止盈单 @ {price:.6f}, {amount}张")
-            order = self.connector.place_order_with_maker_retry(
-                symbol=symbol,
-                side='buy',
-                amount=amount,
-                price=price,
-                order_type='limit',
-                post_only=True,
-                max_retries=5
-            )
-            return order
+            positions = self.connector.query_positions()
+            long_position = next((p for p in positions if p.symbol == symbol and p.side == 'long'), None)
+
+            if long_position:
+                logger.critical(
+                    f"{symbol} ⚠️⚠️⚠️ FORBIDDEN LONG POSITION DETECTED ⚠️⚠️⚠️\n"
+                    f"  仓位大小: {long_position.size}张\n"
+                    f"  开仓价格: {long_position.entry_price}\n"
+                    f"  未实现盈亏: {long_position.unrealized_pnl}\n"
+                    f"  这是严重错误！立即采取应急措施..."
+                )
+
+                # 应急措施：撤销所有下方买单
+                if symbol in self.grid_states:
+                    grid_state = self.grid_states[symbol]
+
+                    cancelled_count = 0
+                    for price, order_id in list(grid_state.lower_orders.items()):
+                        try:
+                            self.connector.cancel_order(order_id, symbol)
+                            cancelled_count += 1
+                        except Exception as e:
+                            logger.error(f"撤单失败 @ {price}: {e}")
+
+                    grid_state.lower_orders.clear()
+                    logger.critical(f"{symbol} 已撤销 {cancelled_count} 个下方买单")
+
+                # TODO: 添加通知机制（email/webhook/telegram）
+                return True
+
+            return False
+
         except Exception as e:
-            logger.error(f"{symbol} 应急模式下单失败: {e}")
-            return None
+            logger.error(f"{symbol} 检查多头仓位失败: {e}")
+            return False
+
 
     def _calculate_grid_level(self, price: float, entry_price: float, spacing: float) -> int:
         """
@@ -1491,75 +1760,79 @@ class GridStrategy:
         symbol: str,
         price: float,
         desired_amount: float,
-        max_retries: int = 3
+        max_retries: int = 5
     ) -> Optional[Order]:
         """
-        仓位感知的买单（绕过 reduce_only 限制）
+        仓位感知的买单（安全版本 - 无应急模式）
 
         Args:
             symbol: 交易对
             price: 价格
             desired_amount: 期望数量
-            max_retries: 最大重试次数（默认3次）
+            max_retries: 最大重试次数（使用指数退避）
 
         Returns:
-            订单对象，如果无法下单则返回 None
+            订单对象，如果无法安全下单则返回 None
         """
         short_position = None
 
-        # 1. 查询当前持仓（带重试机制）
+        # 使用指数退避重试查询仓位
         for attempt in range(max_retries):
+            # 计算退避时间: 1s, 2s, 4s, 8s, 16s
+            if attempt > 0:
+                backoff_time = min(2 ** (attempt - 1), 16)
+                logger.info(f"{symbol} 等待 {backoff_time}秒后重试查询仓位...")
+                time.sleep(backoff_time)
+
             try:
-                positions = self.connector.query_positions()
-
-                # 调试日志：显示所有持仓
-                logger.debug(f"当前持仓数量: {len(positions)}")
-                for p in positions:
-                    logger.debug(f"  {p.symbol}: side={p.side}, contracts={p.contracts}, size={p.size}")
-
-                # 使用 side 字段来判断空头仓位（更可靠）
-                short_position = next((p for p in positions if p.symbol == symbol and p.side == 'short'), None)
+                # 使用缓存查询（首次尝试使用缓存，后续强制刷新）
+                short_position = self._get_cached_short_position(symbol, force_refresh=(attempt > 0))
 
                 if short_position:
-                    # 找到空头仓位，跳出重试循环
+                    logger.debug(f"{symbol} 成功查询到空头仓位: {short_position.size}张")
                     break
-
-                # 未找到空头仓位
-                if attempt < max_retries - 1:
-                    logger.warning(f"{symbol} 未检测到空头仓位，重试 {attempt+1}/{max_retries}")
-                    time.sleep(1)  # 等待1秒后重试
                 else:
-                    logger.error(f"{symbol} 多次重试后仍未检测到空头仓位（当前持仓: {[p.symbol for p in positions]}）")
-                    logger.warning(f"{symbol} 启用应急模式，尝试直接下单")
-                    return self._place_lower_grid_without_position_check(symbol, price, desired_amount)
+                    logger.warning(f"{symbol} 未找到空头仓位 (尝试 {attempt+1}/{max_retries})")
 
             except Exception as e:
                 logger.error(f"{symbol} 查询持仓失败 (尝试 {attempt+1}/{max_retries}): {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(1)
-                else:
-                    logger.warning(f"{symbol} 查询持仓多次失败，启用应急模式")
-                    return self._place_lower_grid_without_position_check(symbol, price, desired_amount)
 
-        # 2. 验证找到了空头仓位
+        # 如果所有重试都失败，不下单（安全第一）
         if not short_position:
-            logger.warning(f"{symbol} 未找到空头仓位，启用应急模式")
-            return self._place_lower_grid_without_position_check(symbol, price, desired_amount)
+            logger.critical(
+                f"{symbol} ⚠️ 无法验证空头仓位！拒绝下单以防止意外开多头。"
+                f"期望下单: {desired_amount}张 @ {price:.6f}"
+            )
+            return None
 
         try:
-            short_amount = short_position.size  # 使用 size 字段（总是正数）
+            short_amount = short_position.size  # size总是正数
 
-            # 3. 计算实际可以平仓的数量
-            actual_amount = min(desired_amount, short_amount)
+            # 计算安全数量（不能超过现有空头仓位）
+            safe_amount = min(desired_amount, short_amount)
 
-            if actual_amount < desired_amount * 0.9:  # 如果实际数量小于期望的90%
-                logger.warning(f"{symbol} 空头仓位不足: 期望 {desired_amount:.2f}, 实际 {short_amount:.2f}, 下单 {actual_amount:.2f}")
+            # 如果安全数量明显小于期望数量，记录警告
+            if safe_amount < desired_amount * 0.9:
+                logger.warning(
+                    f"{symbol} 空头仓位不足: "
+                    f"期望 {desired_amount:.2f}张, 实际 {short_amount:.2f}张, "
+                    f"安全下单 {safe_amount:.2f}张 ({safe_amount/desired_amount*100:.1f}%)"
+                )
+            elif safe_amount < desired_amount:
+                logger.info(
+                    f"{symbol} 调整下单数量: {desired_amount:.2f} → {safe_amount:.2f}张"
+                )
 
-            # 4. 下单（不使用 reduce_only）
+            # 下单（不使用 reduce_only，但我们已经验证了安全性）
+            logger.info(
+                f"{symbol} 下仓位感知买单: {safe_amount:.2f}张 @ {price:.6f} "
+                f"(空头仓位: {short_amount:.2f}张)"
+            )
+
             order = self.connector.place_order_with_maker_retry(
                 symbol=symbol,
                 side='buy',
-                amount=actual_amount,
+                amount=safe_amount,
                 price=price,
                 order_type='limit',
                 post_only=True,

@@ -668,7 +668,40 @@ class ExchangeConnector:
         """解析持仓数据"""
         info = raw.get('info', {})
         contracts = float(raw.get('contracts', 0) or 0)
-        side = 'short' if contracts < 0 else 'long'
+
+        # 🔧 BUG FIX: contracts总是正数，需要从其他字段判断方向
+        # Binance等交易所使用info.positionSide字段标识方向
+        position_side = info.get('positionSide', '').upper()
+        position_amt = float(info.get('positionAmt', 0) or 0)
+        raw_side = raw.get('side', '').lower()
+
+        # 判断优先级：
+        # 1. info.positionSide (Binance使用 'SHORT' 或 'LONG')
+        # 2. info.positionAmt的正负 (负数=空头)
+        # 3. raw.side
+        # 4. contracts的正负（最不可靠）
+        if position_side == 'SHORT':
+            side = 'short'
+        elif position_side == 'LONG':
+            side = 'long'
+        elif position_amt < 0:
+            side = 'short'
+        elif position_amt > 0:
+            side = 'long'
+        elif raw_side in ['short', 'sell']:
+            side = 'short'
+        elif raw_side in ['long', 'buy']:
+            side = 'long'
+        elif contracts < 0:
+            side = 'short'
+        else:
+            # 默认根据contracts正负判断，但这可能不准确
+            side = 'long'
+            logger.warning(
+                f"无法从positionSide/positionAmt判断仓位方向: "
+                f"symbol={raw.get('symbol')}, contracts={contracts}, "
+                f"默认为long"
+            )
 
         return Position(
             symbol=raw.get('symbol'),

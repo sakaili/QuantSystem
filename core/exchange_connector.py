@@ -485,17 +485,32 @@ class ExchangeConnector:
         try:
             results = self.exchange.fetch_positions()
             positions = []
+            filtered_count = 0
+
+            # 🔍 调试日志：查看原始数据
+            logger.debug(f"fetch_positions返回 {len(results)} 条记录")
 
             for r in results:
                 # 只保留有仓位的
                 contracts = float(r.get('contracts', 0) or 0)
+                symbol = r.get('symbol', 'UNKNOWN')
+
                 if abs(contracts) < 0.001:
+                    # 🔍 调试日志：记录被过滤的仓位
+                    logger.debug(f"过滤空仓位: {symbol}, contracts={contracts}")
+                    filtered_count += 1
                     continue
 
                 position = self._parse_position(r)
                 positions.append(position)
 
-            logger.debug(f"查询持仓: {len(positions)}个")
+            logger.debug(f"查询持仓: {len(positions)}个有效, {filtered_count}个空仓位已过滤")
+
+            # 🔍 如果没有找到任何仓位但有订单刚成交，输出更详细的信息
+            if len(positions) == 0 and len(results) > 0:
+                logger.warning(f"⚠️ fetch_positions返回了{len(results)}条数据，但全部contracts<0.001被过滤!")
+                logger.warning("这可能是交易所API延迟导致的，建议增加重试间隔")
+
             return positions
 
         except Exception as e:

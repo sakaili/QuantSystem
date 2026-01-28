@@ -1491,6 +1491,14 @@ class GridStrategy:
         try:
             positions = self.connector.query_positions()
 
+            # 🔍 调试日志：打印所有仓位信息
+            logger.info(f"{symbol} 查询到 {len(positions)} 个仓位:")
+            for idx, p in enumerate(positions):
+                logger.info(
+                    f"  [{idx}] symbol={p.symbol}, side={p.side}, size={p.size}, "
+                    f"contracts={p.contracts}, entry_price={p.entry_price}"
+                )
+
             # 查找空头仓位（使用side字段，更可靠）
             short_pos = next((p for p in positions if p.symbol == symbol and p.side == 'short'), None)
 
@@ -1500,7 +1508,19 @@ class GridStrategy:
                 logger.debug(f"{symbol} 刷新仓位缓存: {short_pos.size}张 @ {short_pos.entry_price}")
                 return short_pos
             else:
-                logger.warning(f"{symbol} 未找到空头仓位")
+                logger.warning(f"{symbol} ⚠️ 未找到空头仓位！")
+                logger.warning(f"  查询条件: symbol={symbol}, side='short'")
+
+                # 尝试放宽条件：只匹配symbol
+                any_pos = next((p for p in positions if p.symbol == symbol), None)
+                if any_pos:
+                    logger.warning(
+                        f"  ⚠️ 找到匹配symbol的仓位，但side不是'short': "
+                        f"side={any_pos.side}, size={any_pos.size}"
+                    )
+                else:
+                    logger.warning(f"  ⚠️ 完全没有匹配symbol的仓位")
+
                 return None
 
         except Exception as e:

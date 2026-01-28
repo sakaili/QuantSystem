@@ -58,3 +58,10 @@ rebalancing:
   profit_threshold: 0.15        # 盈利目标(15%)
   cooldown_hours: 24            # 冷却期(小时)
   max_rebalances_per_day: 3     # 单日最大换仓次数
+
+# Web 仪表板配置 - Web Dashboard Settings
+web_dashboard:
+  enabled: true                  # 启用 Web 仪表板
+  host: "0.0.0.0"               # 监听地址 (0.0.0.0 允许外部访问)
+  port: 5000                    # 监听端口
+  debug: false                  # 调试模式

@@ -27,7 +27,10 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY . .
 
 # 创建必要的目录
-RUN mkdir -p logs data/daily_scans config
+RUN mkdir -p logs data/daily_scans config static
+
+# 暴露 Web 仪表板端口
+EXPOSE 5000
 
 # 验证关键文件存在
 RUN test -f trading_bot.py && \

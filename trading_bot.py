@@ -9,6 +9,7 @@ import argparse
 import signal
 import sys
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, date, timezone
 from enum import Enum
@@ -32,6 +33,7 @@ if current_dir.name == 'QuantSystem':
     from QuantSystem.core.profit_monitor import ProfitMonitor
     from QuantSystem.core.rebalance_manager import RebalanceManager
     from QuantSystem.utils.logger import setup_logger, get_logger
+    from QuantSystem.web_api import WebAPI
 else:
     # 在Docker容器中或直接运行
     from data_fetcher import BinanceDataFetcher
@@ -46,6 +48,7 @@ else:
     from core.profit_monitor import ProfitMonitor
     from core.rebalance_manager import RebalanceManager
     from utils.logger import setup_logger, get_logger
+    from web_api import WebAPI
 
 logger = get_logger("bot")
 
@@ -135,6 +138,24 @@ class TradingBot:
         # 信号处理
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
+
+        # 初始化 Web API (如果启用)
+        self.web_api = None
+        self.web_thread = None
+        if hasattr(self.config_mgr, 'web_dashboard') and self.config_mgr.web_dashboard.get('enabled', False):
+            try:
+                self.web_api = WebAPI(
+                    trading_bot=self,
+                    host=self.config_mgr.web_dashboard.get('host', '0.0.0.0'),
+                    port=self.config_mgr.web_dashboard.get('port', 5000),
+                    debug=self.config_mgr.web_dashboard.get('debug', False)
+                )
+                # 在独立线程中启动 Web 服务器
+                self.web_thread = threading.Thread(target=self.web_api.run, daemon=True)
+                self.web_thread.start()
+                logger.info("Web 仪表板已启动")
+            except Exception as e:
+                logger.error(f"Web 仪表板启动失败: {e}")
 
         logger.info("所有模块初始化完成")
 

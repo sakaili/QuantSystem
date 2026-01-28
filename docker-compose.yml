@@ -22,6 +22,10 @@ services:
       - ./data:/app/data
       - ./config:/app/config:ro  # 只读挂载配置文件
 
+    # 端口映射
+    ports:
+      - "5000:5000"  # Web 仪表板端口
+
     # 网络配置
     network_mode: bridge
 

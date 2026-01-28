@@ -25,3 +25,6 @@ Thumbs.db
 
 # 检查点文件
 checkpoint.json
+
+# Claude Code plans
+.claude/

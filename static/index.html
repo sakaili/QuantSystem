@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>网格交易系统 - 仪表板</title>
+
+    <!-- Bootstrap 5 CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <!-- Bootstrap Icons -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css" rel="stylesheet">
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.3.0/dist/chart.umd.js"></script>
+
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- 导航栏 -->
+    <nav class="navbar navbar-dark bg-dark">
+        <div class="container-fluid">
+            <span class="navbar-brand mb-0 h1">
+                <i class="bi bi-graph-up"></i> 网格交易系统仪表板
+            </span>
+            <span class="text-light">
+                <i class="bi bi-clock"></i> <span id="currentTime"></span>
+                <span class="ms-3" id="systemStatus"></span>
+            </span>
+        </div>
+    </nav>
+
+    <div class="container-fluid mt-3">
+        <!-- 账户总览 -->
+        <div class="row mb-3">
+            <div class="col-md-3">
+                <div class="card">
+                    <div class="card-body">
+                        <h6 class="card-subtitle mb-2 text-muted">总余额</h6>
+                        <h3 class="card-title" id="totalBalance">-</h3>
+                        <small class="text-muted">USDT</small>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card">
+                    <div class="card-body">
+                        <h6 class="card-subtitle mb-2 text-muted">可用保证金</h6>
+                        <h3 class="card-title" id="availableMargin">-</h3>
+                        <small class="text-muted">USDT</small>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card">
+                    <div class="card-body">
+                        <h6 class="card-subtitle mb-2 text-muted">未实现盈亏</h6>
+                        <h3 class="card-title" id="unrealizedPnl">-</h3>
+                        <small class="text-muted">USDT</small>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card">
+                    <div class="card-body">
+                        <h6 class="card-subtitle mb-2 text-muted">保证金使用率</h6>
+                        <h3 class="card-title" id="usagePercentage">-</h3>
+                        <small class="text-muted">%</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 持仓列表 -->
+        <div class="row mb-3">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header">
+                        <h5><i class="bi bi-wallet2"></i> 持仓列表</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-responsive">
+                            <table class="table table-hover" id="positionsTable">
+                                <thead>
+                                    <tr>
+                                        <th>交易对</th>
+                                        <th>入场价</th>
+                                        <th>当前价</th>
+                                        <th>持仓大小</th>
+                                        <th>未实现盈亏</th>
+                                        <th>盈利率</th>
+                                        <th>峰值盈利</th>
+                                        <th>保证金</th>
+                                        <th>操作</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="positionsBody">
+                                    <tr>
+                                        <td colspan="9" class="text-center">加载中...</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 网格状态和盈利监控 -->
+        <div class="row mb-3">
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5><i class="bi bi-grid-3x3"></i> 网格状态</h5>
+                    </div>
+                    <div class="card-body" id="gridStatus">
+                        <p class="text-muted">选择一个持仓查看网格详情</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5><i class="bi bi-graph-up-arrow"></i> 盈利监控</h5>
+                    </div>
+                    <div class="card-body" id="profitMonitor">
+                        <p class="text-muted">加载中...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 性能指标和系统状态 -->
+        <div class="row mb-3">
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5><i class="bi bi-bar-chart"></i> 性能指标</h5>
+                    </div>
+                    <div class="card-body">
+                        <canvas id="performanceChart" height="200"></canvas>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5><i class="bi bi-exclamation-triangle"></i> 风险告警</h5>
+                    </div>
+                    <div class="card-body" id="alertsBody" style="max-height: 300px; overflow-y: auto;">
+                        <p class="text-muted">加载中...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bootstrap JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <!-- 自定义 JS -->
+    <script src="app.js"></script>
+    <script src="charts.js"></script>
+</body>
+</html>

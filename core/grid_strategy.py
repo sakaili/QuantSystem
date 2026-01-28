@@ -1221,7 +1221,7 @@ class GridStrategy:
                     self._place_single_upper_grid_by_price(symbol, grid_state, matched_fill.price)
 
                     # 恢复下方基础止盈单
-                    self._place_lower_grid_by_price(symbol, grid_state, price)
+                    self._place_single_lower_grid_by_price(symbol, grid_state, price)
 
                     # 移除成交记录
                     del grid_state.filled_upper_grids[matched_fill.order_id]

@@ -852,18 +852,47 @@ class GridStrategy:
 
             # 检查是否为边界网格（价格差异小于0.1%）
             if abs(filled_price - min_lower_price) / min_lower_price < 0.001:
-                # 1. 在下方添加新网格（更低价格 - 增加止盈容量）
-                new_lower_price = round(current_price * (1 - spacing), 8)
-                self._place_single_lower_grid_by_price(symbol, grid_state, new_lower_price)
-                logger.info(f"{symbol} 滚动窗口：添加下方网格 @ {new_lower_price:.6f}")
+                # 🔧 NEW STRATEGY: 重新开空以保持空头敞口
+                # 1. 在成交价上方重新开空（profit taking + re-entry）
+                reopen_price = round(filled_price * (1 + spacing), 8)
+                grid_margin = self.config.position.grid_margin
+                reopen_amount = self._calculate_amount(symbol, grid_margin, reopen_price)
 
-                # 2. 移除最远的上方网格（减少开空容量 - 保持平衡）
+                try:
+                    # 下卖单重新开空
+                    sell_order = self.connector.place_order_with_maker_retry(
+                        symbol=symbol,
+                        side='sell',  # 开空
+                        amount=reopen_amount,
+                        price=reopen_price,
+                        order_type='limit',
+                        post_only=True,
+                        reduce_only=False,  # 开仓单
+                        max_retries=5
+                    )
+
+                    if sell_order:
+                        # 添加到上方网格（这是开空单）
+                        grid_state.upper_orders[reopen_price] = sell_order.order_id
+                        logger.info(
+                            f"{symbol} 滚动窗口：重新开空 @ {reopen_price:.6f} "
+                            f"({reopen_amount}张, 成交价={filled_price:.6f})"
+                        )
+                except Exception as e:
+                    logger.error(f"{symbol} 重新开空失败 @ {reopen_price:.6f}: {e}")
+
+                # 2. 移除最远的上方网格（保持窗口大小）
                 if upper_prices:
                     max_upper_price = max(upper_prices)
                     self._remove_grid_by_price(symbol, grid_state, max_upper_price, is_upper=True)
-                    logger.info(f"{symbol} 滚动窗口：移除最远上方网格 @ {max_upper_price:.6f} (保持平衡)")
+                    logger.info(f"{symbol} 滚动窗口：移除最远上方网格 @ {max_upper_price:.6f}")
 
-                # NET: +1 take-profit capacity, -1 short capacity (BALANCED)
+                # 3. 在下方添加新网格（更低价格 - 保持下方保护）
+                new_lower_price = round(current_price * (1 - spacing), 8)
+                self._place_single_lower_grid_by_price(symbol, grid_state, new_lower_price)
+                logger.info(f"{symbol} 滚动窗口：添加下方保护 @ {new_lower_price:.6f}")
+
+                # NET: +1 short (reopen), -1 short (remove), +1 lower → MAINTAINS SHORT EXPOSURE ✅
 
     def _place_single_upper_grid(self, symbol: str, grid_state: GridState, level: int, price: float) -> None:
         """

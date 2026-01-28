@@ -1320,11 +1320,51 @@ class GridStrategy:
                 # 挂基础仓位的分层止盈单（恢复时持仓已存在）
                 logger.info(f"挂基础仓位分层止盈单: {symbol}")
                 self._place_base_position_take_profit(symbol, grid_state)
+
+                # 标记网格为已验证
+                grid_state.grid_integrity_validated = True
             else:
                 logger.info(f"发现{len(open_orders)}个挂单，恢复网格状态")
-                # TODO: 解析现有订单，恢复upper_orders/lower_orders
-                # 暂时简单处理：只恢复grid_state
+
+                # 解析现有订单，恢复upper_orders/lower_orders
+                for order in open_orders:
+                    order_price = round(order.price, 8)
+
+                    # 匹配上方网格订单（卖单）
+                    if order.side == 'sell':
+                        for level in grid_state.grid_prices.get_upper_levels():
+                            target_price = round(grid_state.grid_prices.grid_levels[level], 8)
+                            if abs(order_price - target_price) / target_price < 0.001:  # 0.1%容差
+                                grid_state.upper_orders[order_price] = order.order_id
+                                logger.info(f"  恢复上方网格订单 @ {order_price:.6f} (Grid{level})")
+                                break
+
+                    # 匹配下方网格订单（买单）
+                    elif order.side == 'buy':
+                        for level in grid_state.grid_prices.get_lower_levels():
+                            target_price = round(grid_state.grid_prices.grid_levels[level], 8)
+                            if abs(order_price - target_price) / target_price < 0.001:
+                                grid_state.lower_orders[order_price] = order.order_id
+                                logger.info(f"  恢复下方网格订单 @ {order_price:.6f} (Grid{level})")
+                                break
+
+                logger.info(f"订单恢复完成: {len(grid_state.upper_orders)}个上方网格, {len(grid_state.lower_orders)}个下方网格")
                 self.grid_states[symbol] = grid_state
+
+                # 补充缺失的订单
+                missing_upper = len(grid_state.grid_prices.get_upper_levels()) - len(grid_state.upper_orders)
+                missing_lower = len(grid_state.grid_prices.get_lower_levels()) - len(grid_state.lower_orders)
+
+                if missing_upper > 0:
+                    logger.info(f"检测到{missing_upper}个缺失的上方网格订单，开始补充...")
+                    self._place_upper_grid_orders(symbol, grid_state)
+
+                if missing_lower > 0:
+                    logger.info(f"检测到{missing_lower}个缺失的下方网格订单，开始补充...")
+                    self._place_base_position_take_profit(symbol, grid_state)
+
+                # 标记网格为已验证（允许后续修复机制运行）
+                grid_state.grid_integrity_validated = True
 
             logger.info(f"网格恢复完成: {symbol}")
             return True

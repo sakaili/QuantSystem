@@ -1402,13 +1402,20 @@ class GridStrategy:
         # 1. 查询当前持仓
         try:
             positions = self.connector.query_positions()
-            short_position = next((p for p in positions if p.symbol == symbol and p.contracts < 0), None)
+
+            # 调试日志：显示所有持仓
+            logger.debug(f"当前持仓数量: {len(positions)}")
+            for p in positions:
+                logger.debug(f"  {p.symbol}: side={p.side}, contracts={p.contracts}, size={p.size}")
+
+            # 使用 side 字段来判断空头仓位（更可靠）
+            short_position = next((p for p in positions if p.symbol == symbol and p.side == 'short'), None)
 
             if not short_position:
-                logger.warning(f"{symbol} 没有空头仓位，跳过买单")
+                logger.warning(f"{symbol} 没有空头仓位，跳过买单（当前持仓: {[p.symbol for p in positions]}）")
                 return None
 
-            short_amount = abs(short_position.contracts)
+            short_amount = short_position.size  # 使用 size 字段（总是正数）
 
             # 2. 计算实际可以平仓的数量
             actual_amount = min(desired_amount, short_amount)

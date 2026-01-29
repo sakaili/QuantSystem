@@ -853,8 +853,9 @@ class GridStrategy:
             # 检查是否为边界网格（价格差异小于0.1%）
             if abs(filled_price - min_lower_price) / min_lower_price < 0.001:
                 # 🔧 NEW STRATEGY: 重新开空以保持空头敞口
-                # 1. 在成交价上方重新开空（profit taking + re-entry）
-                reopen_price = round(filled_price * (1 + spacing), 8)
+                # 1. 在当前价格上方重新开空（profit taking + re-entry）
+                # 🔧 FIX 3: 使用当前价格计算重新开空价格，避免与恢复网格冲突
+                reopen_price = round(current_price * (1 + spacing), 8)
                 grid_margin = self.config.position.grid_margin
                 reopen_amount = self._calculate_amount(symbol, grid_margin, reopen_price)
 
@@ -1018,7 +1019,7 @@ class GridStrategy:
 
             # 检查是否已存在
             if price in grid_state.upper_orders:
-                logger.debug(f"{symbol} 上方网格已存在 @ {price:.6f}")
+                logger.warning(f"{symbol} 上方网格已存在 @ {price:.6f}，跳过挂单")
                 return
 
             grid_margin = self.config.position.grid_margin
@@ -1303,8 +1304,20 @@ class GridStrategy:
                     profit_pct = (matched_fill.price - price) / matched_fill.price * 100
                     logger.info(f"完整循环: 开仓 @ {matched_fill.price:.6f}, 平仓 @ {price:.6f}, 盈利 {profit_pct:.2f}%")
 
+                    # 🔧 FIX 1: 清理旧上方网格记录
+                    if matched_fill.price in grid_state.upper_orders:
+                        old_order_id = grid_state.upper_orders[matched_fill.price]
+                        logger.debug(f"{symbol} 清理旧上方网格记录 @ {matched_fill.price:.6f}, order_id={old_order_id}")
+                        del grid_state.upper_orders[matched_fill.price]
+
                     # 恢复上方网格
                     self._place_single_upper_grid_by_price(symbol, grid_state, matched_fill.price)
+
+                    # 🔧 FIX 2: 清理旧下方网格记录
+                    if price in grid_state.lower_orders:
+                        old_order_id = grid_state.lower_orders[price]
+                        logger.debug(f"{symbol} 清理旧下方网格记录 @ {price:.6f}, order_id={old_order_id}")
+                        del grid_state.lower_orders[price]
 
                     # 恢复下方基础止盈单
                     self._place_single_lower_grid_by_price(symbol, grid_state, price)

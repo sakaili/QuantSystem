@@ -132,7 +132,19 @@ class GridStrategy:
         self._last_reconciliation: Dict[str, datetime] = {}
         self._reconciliation_interval = 60  # 对账间隔 (秒)
 
+        # 🔧 NEW: 不健康币种标记（IMBALANCE检测到的）
+        self._unhealthy_symbols: set = set()
+
         logger.info("网格策略执行器初始化完成")
+
+    def get_unhealthy_symbols(self) -> set:
+        """
+        获取不健康的币种列表（IMBALANCE检测到的）
+
+        Returns:
+            不健康币种的集合
+        """
+        return self._unhealthy_symbols.copy()
 
     def calculate_grid_prices(self, entry_price: float) -> GridPrices:
         """
@@ -640,6 +652,12 @@ class GridStrategy:
             symbol: 交易对
             grid_state: 网格状态
         """
+        # 🔧 NEW: 跳过不健康的币种（避免反复撤销/挂单循环）
+        if symbol in self._unhealthy_symbols:
+            logger.debug(f"{symbol} 已标记为不健康，跳过下方网格修复")
+            # 但仍然修复上方网格
+            return
+
         if not self._should_check_grid_repair(grid_state):
             return
 
@@ -1722,6 +1740,10 @@ class GridStrategy:
                 f"空头仓位={short_size:.2f}张, "
                 f"比例={ratio*100:.1f}%"
             )
+
+            # 🔧 NEW: 标记为不健康币种，停止修复下方网格
+            self._unhealthy_symbols.add(symbol)
+            logger.warning(f"{symbol} 已标记为不健康币种，停止修复下方网格")
 
             # 应急处理：撤销最远的下方网格
             if grid_state.lower_orders:

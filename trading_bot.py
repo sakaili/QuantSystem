@@ -409,10 +409,17 @@ class TradingBot:
         current_count = self.position_mgr.get_position_count()
         max_count = self.config_mgr.position.max_symbols
 
-        # 检查不健康的持仓
-        unhealthy_positions = self.position_mgr.get_unhealthy_positions(
+        # 检查不健康的持仓（两种来源）
+        # 1. PositionManager检测的（空头头寸不足40%）
+        unhealthy_from_position = self.position_mgr.get_unhealthy_positions(
             min_ratio=self.config_mgr.position.min_base_position_ratio
         )
+
+        # 2. GridStrategy检测的（IMBALANCE）
+        unhealthy_from_grid = self.grid_strategy.get_unhealthy_symbols()
+
+        # 合并两个来源
+        unhealthy_positions = list(set(unhealthy_from_position) | unhealthy_from_grid)
 
         if unhealthy_positions:
             logger.info(

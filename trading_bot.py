@@ -186,6 +186,9 @@ class TradingBot:
                 if self.config_mgr.rebalancing.enabled:
                     self.monitor_profit_rebalancing()
 
+                # 3.6. 🔧 NEW: 检查是否需要补充新品种
+                self.check_and_fill_positions()
+
                 # 4. 风险检查
                 self.handle_risk_alerts()
 
@@ -266,11 +269,18 @@ class TradingBot:
             self.current_candidates = valid_candidates[:10]  # 保存前10个候选
             logger.info(f"更新候选币列表: {self.current_candidates}")
 
-            # 1. 优先处理手动指定币种
+            # 1. 优先处理手动指定币种（仅处理未持仓的）
             manual_symbols = self.config_mgr.position.manual_symbols
             if manual_symbols:
-                logger.info(f"检测到手动指定币种: {manual_symbols}")
-                self.evaluate_new_entries(manual_symbols)
+                # 🔧 FIX: 过滤掉已持仓的manual_symbols
+                existing_symbols = set(self.position_mgr.get_all_symbols())
+                new_manual_symbols = [s for s in manual_symbols if s not in existing_symbols]
+
+                if new_manual_symbols:
+                    logger.info(f"检测到未持仓的手动指定币种: {new_manual_symbols}")
+                    self.evaluate_new_entries(new_manual_symbols)
+                else:
+                    logger.info(f"手动指定币种 {manual_symbols} 已全部持仓")
 
             # 2. 处理筛选出的候选币种
             self.evaluate_new_entries(valid_candidates[:5])
@@ -380,6 +390,44 @@ class TradingBot:
 
             except Exception as e:
                 logger.warning(f"监控失败 {symbol}: {e}")
+
+    def check_and_fill_positions(self) -> None:
+        """
+        检查持仓健康度并自动补充新品种
+
+        如果现有持仓的空头头寸不足，且持仓数量未达上限，则开新品种
+        """
+        # 每10次循环检查一次（避免过于频繁）
+        if not hasattr(self, '_fill_check_count'):
+            self._fill_check_count = 0
+
+        self._fill_check_count += 1
+
+        if self._fill_check_count % 10 != 0:
+            return
+
+        current_count = self.position_mgr.get_position_count()
+        max_count = self.config_mgr.position.max_symbols
+
+        # 检查不健康的持仓
+        unhealthy_positions = self.position_mgr.get_unhealthy_positions(
+            min_ratio=self.config_mgr.position.min_base_position_ratio
+        )
+
+        if unhealthy_positions:
+            logger.info(
+                f"检测到{len(unhealthy_positions)}个不健康持仓: {unhealthy_positions}, "
+                f"当前持仓{current_count}/{max_count}"
+            )
+
+        # 如果持仓数量未达上限，或有不健康持仓，尝试补充新品种
+        if current_count < max_count or unhealthy_positions:
+            # 使用当前候选币列表
+            if self.current_candidates:
+                logger.info(f"尝试从候选币列表补充新品种: {self.current_candidates[:3]}")
+                self.evaluate_new_entries(self.current_candidates[:5])
+            else:
+                logger.debug("没有可用的候选币列表，跳过补充")
 
     def update_all_grids(self) -> None:
         """更新所有网格状态"""

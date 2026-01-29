@@ -155,11 +155,35 @@ class PositionManager:
             是否可以开仓
         """
         # 检查持仓数量限制
-        if len(self.positions) >= self.config.position.max_symbols:
-            logger.warning(
-                f"已达最大持仓数量: {len(self.positions)}/{self.config.position.max_symbols}"
+        max_symbols = self.config.position.max_symbols
+        current_count = len(self.positions)
+
+        # 🔧 NEW: 检查是否有不健康的持仓（空头头寸不足）
+        unhealthy_positions = self.get_unhealthy_positions(
+            min_ratio=self.config.position.min_base_position_ratio
+        )
+
+        if unhealthy_positions:
+            logger.info(
+                f"检测到{len(unhealthy_positions)}个不健康持仓: {unhealthy_positions}, "
+                f"允许开新仓以替换"
             )
-            return False
+            # 如果有不健康的持仓，允许超过max_symbols开新仓
+            # 但不能超过max_symbols + 不健康持仓数量
+            effective_max = max_symbols + len(unhealthy_positions)
+            if current_count >= effective_max:
+                logger.warning(
+                    f"已达有效最大持仓数: {current_count}/{effective_max} "
+                    f"(max={max_symbols}, unhealthy={len(unhealthy_positions)})"
+                )
+                return False
+        else:
+            # 没有不健康持仓，正常检查
+            if current_count >= max_symbols:
+                logger.warning(
+                    f"已达最大持仓数量: {current_count}/{max_symbols}"
+                )
+                return False
 
         # 检查保证金是否充足
         if required_margin > self.available_margin:
@@ -214,6 +238,65 @@ class PositionManager:
     def get_all_symbols(self) -> List[str]:
         """获取所有持仓的交易对"""
         return list(self.positions.keys())
+
+    def check_position_health(self, symbol: str, min_ratio: float = 0.4) -> bool:
+        """
+        检查持仓健康度（空头头寸是否充足）
+
+        Args:
+            symbol: 交易对
+            min_ratio: 最小保留基础仓位比例（默认40%）
+
+        Returns:
+            True表示健康，False表示空头头寸不足
+        """
+        if symbol not in self.positions:
+            return True  # 没有持仓，视为健康
+
+        position = self.positions[symbol]
+
+        # 如果没有基础仓位，视为不健康
+        if not position.base_position:
+            logger.warning(f"{symbol} 没有基础仓位")
+            return False
+
+        # 获取初始基础仓位大小（从initial_margin推算）
+        # initial_margin = base_margin，base_position应该约等于 base_margin × leverage / price
+        base_margin = self.config.position.base_margin
+        leverage = self.config.account.leverage
+        expected_base_size = (base_margin * leverage) / position.entry_price
+
+        # 当前基础仓位大小
+        current_base_size = abs(position.base_position.size)
+
+        # 计算剩余比例
+        remaining_ratio = current_base_size / expected_base_size if expected_base_size > 0 else 0
+
+        if remaining_ratio < min_ratio:
+            logger.warning(
+                f"{symbol} 空头头寸不足: "
+                f"当前={current_base_size:.2f}, 预期={expected_base_size:.2f}, "
+                f"剩余比例={remaining_ratio:.1%} < {min_ratio:.1%}"
+            )
+            return False
+
+        return True
+
+    def get_unhealthy_positions(self, min_ratio: float = 0.4) -> List[str]:
+        """
+        获取所有不健康的持仓（空头头寸不足）
+
+        Args:
+            min_ratio: 最小保留基础仓位比例
+
+        Returns:
+            不健康持仓的交易对列表
+        """
+        unhealthy = []
+        for symbol in self.positions.keys():
+            if not self.check_position_health(symbol, min_ratio):
+                unhealthy.append(symbol)
+        return unhealthy
 
     def update_unrealized_pnl(self, symbol: str, current_price: float) -> None:
         """

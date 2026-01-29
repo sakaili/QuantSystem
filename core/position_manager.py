@@ -260,26 +260,37 @@ class PositionManager:
             logger.warning(f"{symbol} 没有基础仓位")
             return False
 
-        # 获取初始基础仓位大小（从initial_margin推算）
-        # initial_margin = base_margin，base_position应该约等于 base_margin × leverage / price
+        # 🔧 FIX: 计算初始总空头仓位（基础仓位 + 上方网格）
         base_margin = self.config.position.base_margin
+        grid_margin = self.config.position.grid_margin
+        upper_grids = self.config.grid.upper_grids
         leverage = self.config.account.leverage
-        expected_base_size = (base_margin * leverage) / position.entry_price
 
-        # 当前基础仓位大小
-        current_base_size = abs(position.base_position.size)
+        # 初始总保证金
+        total_initial_margin = base_margin + (grid_margin * upper_grids)
+
+        # 初始总空头仓位（合约数量）
+        expected_total_size = (total_initial_margin * leverage) / position.entry_price
+
+        # 当前总空头仓位大小
+        current_total_size = abs(position.base_position.size)
 
         # 计算剩余比例
-        remaining_ratio = current_base_size / expected_base_size if expected_base_size > 0 else 0
+        remaining_ratio = current_total_size / expected_total_size if expected_total_size > 0 else 0
 
         if remaining_ratio < min_ratio:
             logger.warning(
                 f"{symbol} 空头头寸不足: "
-                f"当前={current_base_size:.2f}, 预期={expected_base_size:.2f}, "
+                f"当前={current_total_size:.2f}张, 预期={expected_total_size:.2f}张, "
                 f"剩余比例={remaining_ratio:.1%} < {min_ratio:.1%}"
             )
             return False
 
+        logger.debug(
+            f"{symbol} 空头头寸健康: "
+            f"当前={current_total_size:.2f}张, 预期={expected_total_size:.2f}张, "
+            f"剩余比例={remaining_ratio:.1%}"
+        )
         return True
 
     def get_unhealthy_positions(self, min_ratio: float = 0.4) -> List[str]:

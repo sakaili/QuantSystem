@@ -322,6 +322,16 @@ class ConfigManager:
         if self.grid.spacing <= 0 or self.grid.spacing >= 1:
             raise ConfigurationError("网格间距必须在(0, 1)范围内")
 
+        # 验证最小网格数量
+        if self.grid.upper_grids < 3:
+            raise ConfigurationError("上方网格数量不能少于3个")
+        if self.grid.lower_grids < 3:
+            raise ConfigurationError("下方网格数量不能少于3个")
+
+        # 验证网格间距合理性
+        if self.grid.spacing < 0.005 or self.grid.spacing > 0.05:
+            raise ConfigurationError("网格间距应在0.5%-5%之间")
+
         # 验证网格修复配置
         if self.grid.repair_interval < 5:
             raise ConfigurationError("修复检查间隔不能小于5秒")

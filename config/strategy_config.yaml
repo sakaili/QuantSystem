@@ -12,10 +12,10 @@ account:
 
 # 网格配置 - Grid Settings
 grid:
-  count: 20                     # 网格总数
-  spacing: 0.015                # 网格间距(0.5%,从1%优化)
-  upper_grids: 10               # 上方网格数(开空)
-  lower_grids: 10               # 下方网格数(平空)
+  count: 10                     # 网格总数 (从20改为10)
+  spacing: 0.015                # 网格间距(1.5%)
+  upper_grids: 5                # 上方网格数(开空,从10改为5)
+  lower_grids: 5                # 下方网格数(平空,从10改为5)
 
   # 网格修复配置
   repair_enabled: true          # 启用自动修复
@@ -26,8 +26,8 @@ grid:
 
   # 移动网格配置（无限网格策略）
   dynamic_expansion: true       # 启用动态扩展
-  max_total_grids: 30           # 最大总网格数（上方+下方）
-  max_side_grids: 15            # 单侧最多网格数
+  max_total_grids: 20           # 最大总网格数（上方+下方,从30改为20）
+  max_side_grids: 10            # 单侧最多网格数(从15改为10)
 
 # 仓位配置 - Position Settings
 position:
@@ -35,7 +35,7 @@ position:
   base_margin: 50.0             # 基础仓位保证金(USDT,每品种) - 核心空头持仓
   grid_margin: 10.5             # 单网格保证金(USDT,每品种) - 波动收益
   manual_symbols: [1000WHYUSDT]            # 手动指定必开币种(占用max_symbols配额), 例: ["BTCUSDT", "ETHUSDT"]
-  min_base_position_ratio: 0.3  # 最小保留基础仓位比例(30%) - 防止完全平仓
+  min_base_position_ratio: 0.4  # 最小保留基础仓位比例(40%,从30%提高) - 防止完全平仓
   # single_symbol_max: 改为动态计算 = (账户余额 × 0.9) / 5
   # total_margin_limit: 改为动态计算 = 账户余额 × 0.9
 

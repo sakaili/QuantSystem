@@ -533,7 +533,8 @@ class GridStrategy:
 
         price = grid_state.grid_prices.grid_levels[level]
         base_margin = self.config.position.base_margin
-        base_amount_per_level = self._calculate_amount(symbol, base_margin / 10, grid_state.entry_price)
+        total_levels = len(grid_state.grid_prices.get_lower_levels())
+        base_amount_per_level = self._calculate_amount(symbol, base_margin / total_levels, grid_state.entry_price)
 
         try:
             logger.debug(f"重新挂基础止盈单 Grid-{level}: {base_amount_per_level}张 × {price}")
@@ -560,11 +561,12 @@ class GridStrategy:
 
         price = grid_state.grid_prices.grid_levels[level]
 
-        # 计算总数量：基础仓位的1/10 + 网格仓位
+        # 计算总数量：基础仓位的1/total_levels + 网格仓位
         base_margin = self.config.position.base_margin
         grid_margin = self.config.position.grid_margin
 
-        base_amount = self._calculate_amount(symbol, base_margin / 10, grid_state.entry_price)
+        total_levels = len(grid_state.grid_prices.get_lower_levels())
+        base_amount = self._calculate_amount(symbol, base_margin / total_levels, grid_state.entry_price)
         grid_amount = self._calculate_amount(symbol, grid_margin, price)
         total_amount = base_amount + grid_amount
 
@@ -767,17 +769,18 @@ class GridStrategy:
         """
         try:
             # 判断是基础止盈还是增强止盈
+            total_levels = len(grid_state.grid_prices.get_lower_levels())
             if level in grid_state.filled_grids:
                 # 已有对应上方开仓，补充增强止盈
                 base_margin = self.config.position.base_margin
                 grid_margin = self.config.position.grid_margin
-                base_amount = self._calculate_amount(symbol, base_margin / 10, grid_state.entry_price)
+                base_amount = self._calculate_amount(symbol, base_margin / total_levels, grid_state.entry_price)
                 grid_amount = self._calculate_amount(symbol, grid_margin, price)
                 total_amount = base_amount + grid_amount
             else:
                 # 仅基础止盈
                 base_margin = self.config.position.base_margin
-                total_amount = self._calculate_amount(symbol, base_margin / 10, grid_state.entry_price)
+                total_amount = self._calculate_amount(symbol, base_margin / total_levels, grid_state.entry_price)
 
             order = self.connector.place_order_with_maker_retry(
                 symbol=symbol,
@@ -942,18 +945,19 @@ class GridStrategy:
             # Grid-5 对应 Grid+5
             opposite_level = abs(level)
 
+            total_levels = len(grid_state.grid_prices.get_lower_levels())
             if opposite_level in grid_state.filled_grids:
-                # 有对应仓位，使用增强止盈（基础仓位1/10 + 网格仓位）
+                # 有对应仓位，使用增强止盈（基础仓位1/total_levels + 网格仓位）
                 base_margin = self.config.position.base_margin
                 grid_margin = self.config.position.grid_margin
-                base_amount = self._calculate_amount(symbol, base_margin / 10, grid_state.entry_price)
+                base_amount = self._calculate_amount(symbol, base_margin / total_levels, grid_state.entry_price)
                 grid_amount = self._calculate_amount(symbol, grid_margin, price)
                 total_amount = base_amount + grid_amount
                 logger.debug(f"{symbol} 增强止盈: 基础{base_amount}张 + 网格{grid_amount}张")
             else:
                 # 仅基础止盈
                 base_margin = self.config.position.base_margin
-                total_amount = self._calculate_amount(symbol, base_margin / 10, grid_state.entry_price)
+                total_amount = self._calculate_amount(symbol, base_margin / total_levels, grid_state.entry_price)
 
             order = self.connector.place_order_with_maker_retry(
                 symbol=symbol,
@@ -1058,9 +1062,10 @@ class GridStrategy:
                 logger.debug(f"{symbol} 下方网格已存在 @ {price:.6f}")
                 return
 
-            # 仅基础止盈（基础仓位的1/10）
+            # 仅基础止盈（基础仓位的1/total_levels）
             base_margin = self.config.position.base_margin
-            amount = self._calculate_amount(symbol, base_margin / 10, grid_state.entry_price)
+            total_levels = len(grid_state.grid_prices.get_lower_levels())
+            amount = self._calculate_amount(symbol, base_margin / total_levels, grid_state.entry_price)
 
             # 验证总仓位不会超限
             is_safe, safe_amount, warning = self._validate_total_exposure_before_buy_order(
@@ -1104,10 +1109,11 @@ class GridStrategy:
         try:
             price = round(price, 8)  # 统一精度
 
-            # 计算增强止盈数量：基础仓位1/10 + 网格仓位
+            # 计算增强止盈数量：基础仓位1/total_levels + 网格仓位
             base_margin = self.config.position.base_margin
             grid_margin = self.config.position.grid_margin
-            base_amount = self._calculate_amount(symbol, base_margin / 10, grid_state.entry_price)
+            total_levels = len(grid_state.grid_prices.get_lower_levels())
+            base_amount = self._calculate_amount(symbol, base_margin / total_levels, grid_state.entry_price)
             grid_amount = self._calculate_amount(symbol, grid_margin, price)
             total_amount = base_amount + grid_amount
 

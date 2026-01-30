@@ -424,7 +424,7 @@ class GridStrategy:
                             side='buy',  # 平空
                             amount=abs(pos.contracts),
                             order_type='market',
-                            reduce_only=False
+                            reduce_only=True  # 强制只减仓
                         )
                         logger.info(f"已市价平仓: {abs(pos.contracts)}张")
                     except Exception as e:
@@ -478,7 +478,7 @@ class GridStrategy:
                     price=price,
                     order_type='limit',
                     post_only=True,
-                    reduce_only=False,  # 不使用reduceOnly
+                    reduce_only=True,  # 强制只减仓
                     max_retries=5
                 )
 
@@ -554,8 +554,8 @@ class GridStrategy:
                 price=price,
                 order_type='limit',
                 post_only=True,
+                reduce_only=True,  # 强制只减仓
                 max_retries=5
-                # 移除reduce_only参数
             )
 
             grid_state.lower_orders[level] = order.order_id
@@ -588,8 +588,8 @@ class GridStrategy:
                 price=price,
                 order_type='limit',
                 post_only=True,
+                reduce_only=True,  # 强制只减仓
                 max_retries=5
-                # 移除reduce_only参数
             )
 
             grid_state.lower_orders[level] = order.order_id
@@ -804,8 +804,8 @@ class GridStrategy:
                 price=price,
                 order_type='limit',
                 post_only=True,
+                reduce_only=True,  # 强制只减仓
                 max_retries=5
-                # 移除reduce_only参数
             )
 
             grid_state.lower_orders[level] = order.order_id
@@ -985,8 +985,8 @@ class GridStrategy:
                 price=price,
                 order_type='limit',
                 post_only=True,
+                reduce_only=True,  # 强制只减仓
                 max_retries=5
-                # 移除reduce_only参数
             )
 
             grid_state.lower_orders[level] = order.order_id
@@ -1389,7 +1389,7 @@ class GridStrategy:
                     side='buy',  # 平空
                     amount=size,
                     order_type='market',
-                    reduce_only=False  # 不使用reduceOnly
+                    reduce_only=True  # 强制只减仓
                 )
                 logger.info(f"市价平仓: {symbol}, 数量={size}")
             except Exception as e:
@@ -1403,30 +1403,45 @@ class GridStrategy:
 
     def recover_grid_from_position(self, symbol: str, entry_price: float) -> bool:
         """
-        从现有持仓恢复网格状态
+        从现有持仓恢复网格状态（使用持仓成本价重建网格）
 
         Args:
             symbol: 交易对
-            entry_price: 入场价
+            entry_price: 数据库中保存的入场价（将被忽略）
 
         Returns:
             是否成功
         """
         try:
-            logger.info(f"恢复网格状态: {symbol} @ {entry_price}")
+            # 🔧 NEW: 查询当前持仓的实际成本价
+            positions = self.connector.query_positions()
+            short_position = next((p for p in positions if p.symbol == symbol and p.side == 'short'), None)
+
+            if not short_position:
+                logger.error(f"恢复网格失败: {symbol} 未找到空头持仓")
+                return False
+
+            # 使用持仓的实际成本价作为entry_price
+            actual_entry_price = short_position.entry_price
+            logger.info(
+                f"恢复网格状态: {symbol}\n"
+                f"  数据库entry_price: {entry_price:.6f}\n"
+                f"  持仓成本价: {actual_entry_price:.6f}\n"
+                f"  使用持仓成本价重建网格"
+            )
 
             # 如果已经有grid_state，跳过
             if symbol in self.grid_states:
                 logger.info(f"网格状态已存在: {symbol}")
                 return True
 
-            # 计算网格价格
-            grid_prices = self.calculate_grid_prices(entry_price)
+            # 🔧 使用持仓成本价计算网格价格
+            grid_prices = self.calculate_grid_prices(actual_entry_price)
 
             # 创建网格状态
             grid_state = GridState(
                 symbol=symbol,
-                entry_price=entry_price,
+                entry_price=actual_entry_price,  # 使用持仓成本价
                 grid_prices=grid_prices
             )
 
@@ -1927,6 +1942,7 @@ class GridStrategy:
                 price=price,
                 order_type='limit',
                 post_only=True,
+                reduce_only=True,  # 强制只减仓
                 max_retries=5
             )
             return order

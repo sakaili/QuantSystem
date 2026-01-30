@@ -150,12 +150,12 @@ class ExchangeConnector:
         # 订单缓存
         self.order_cache: Dict[str, Order] = {}
 
-        # 设置单向持仓模式（只能持有一个方向的仓位）
+        # 设置双向持仓模式（防止意外开多，reduceOnly可以安全工作）
         try:
-            self.exchange.set_position_mode(False)  # False = 单向持仓模式
-            logger.info("已设置为单向持仓模式(One-Way Mode)")
+            self.exchange.set_position_mode(True)  # True = 双向持仓模式(Hedge Mode)
+            logger.info("已设置为双向持仓模式(Hedge Mode) - 防止买单过多导致意外开多")
         except Exception as e:
-            logger.warning(f"设置持仓模式失败(可能已是单向模式): {e}")
+            logger.warning(f"设置持仓模式失败(可能已是双向模式): {e}")
 
         logger.info("交易所连接器初始化完成")
 

@@ -26,8 +26,8 @@ grid:
 
   # 移动网格配置（无限网格策略）
   dynamic_expansion: true       # 启用动态扩展
-  max_total_grids: 20           # 最大总网格数（上方+下方,从30改为20）
-  max_side_grids: 10            # 单侧最多网格数(从15改为10)
+  max_total_grids: 999          # 最大总网格数（设为999实现无限网格）
+  max_side_grids: 999           # 单侧最多网格数（设为999实现无限网格）
 
 # 仓位配置 - Position Settings
 position:

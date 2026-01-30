@@ -215,26 +215,23 @@ class GridStrategy:
             # 计算网格价格
             grid_prices = self.calculate_grid_prices(entry_price)
 
-            # 1. 开基础仓位
+            # 1. 开基础仓位（使用市价单立即成交）
             base_margin = self.config.position.base_margin
             base_amount = self._calculate_amount(symbol, base_margin, entry_price)
 
-            logger.info(f"开基础仓位: {base_amount}张 × {entry_price}")
-            base_order = self.connector.place_order_with_maker_retry(
+            logger.info(f"开基础仓位（市价）: {base_amount}张")
+            base_order = self.connector.place_order(
                 symbol=symbol,
                 side='sell',  # 开空
                 amount=base_amount,
-                price=entry_price,  # 该参数会被内部根据订单簿调整
-                order_type='limit',
-                post_only=True,
-                max_retries=5
+                order_type='market'
             )
 
             base_order_id = base_order.order_id  # 保存用于可能的清理
 
-            # 2. 轮询等待基础仓位成交（关键：确保持有空仓后再挂网格）
-            logger.info(f"等待基础仓位成交: order_id={base_order_id}")
-            base_filled = self._wait_for_order_fill(symbol, base_order_id, timeout=3600)  # 1小时超时
+            # 2. 等待基础仓位成交确认（市价单通常立即成交，短超时即可）
+            logger.info(f"等待基础仓位成交确认: order_id={base_order_id}")
+            base_filled = self._wait_for_order_fill(symbol, base_order_id, timeout=30)  # 30秒超时
 
             if not base_filled:
                 logger.error(f"基础仓位超时未成交，初始化失败")

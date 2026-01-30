@@ -520,7 +520,7 @@ class ExchangeConnector:
     @retry_on_network_error()
     def query_balance(self) -> Balance:
         """
-        查询账户余额
+        查询账户余额（包括所有币种折算的保证金）
 
         Returns:
             Balance对象
@@ -529,16 +529,38 @@ class ExchangeConnector:
 
         try:
             result = self.exchange.fetch_balance()
-            usdt = result.get('USDT', {})
 
-            balance = Balance(
-                total=float(usdt.get('total', 0)),
-                available=float(usdt.get('free', 0)),
-                used=float(usdt.get('used', 0)),
-                timestamp=datetime.now(timezone.utc)
-            )
+            # 优先使用总保证金余额（包括所有币种）
+            info = result.get('info', {})
 
-            logger.debug(f"账户余额: total={balance.total}, available={balance.available}")
+            # 币安合约API返回的总保证金信息
+            total_margin_balance = float(info.get('totalMarginBalance', 0))
+            available_balance = float(info.get('availableBalance', 0))
+            total_wallet_balance = float(info.get('totalWalletBalance', 0))
+
+            # 如果API返回了总保证金，使用总保证金；否则回退到USDT余额
+            if total_margin_balance > 0 or available_balance > 0:
+                balance = Balance(
+                    total=total_margin_balance if total_margin_balance > 0 else total_wallet_balance,
+                    available=available_balance,
+                    used=total_margin_balance - available_balance if total_margin_balance > 0 else 0,
+                    timestamp=datetime.now(timezone.utc)
+                )
+                logger.debug(
+                    f"账户保证金余额: total={balance.total:.2f} USDT, "
+                    f"available={balance.available:.2f} USDT (包括所有币种)"
+                )
+            else:
+                # 回退到仅USDT余额
+                usdt = result.get('USDT', {})
+                balance = Balance(
+                    total=float(usdt.get('total', 0)),
+                    available=float(usdt.get('free', 0)),
+                    used=float(usdt.get('used', 0)),
+                    timestamp=datetime.now(timezone.utc)
+                )
+                logger.debug(f"账户USDT余额: total={balance.total}, available={balance.available}")
+
             return balance
 
         except Exception as e:

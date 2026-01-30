@@ -82,13 +82,14 @@ class CapitalAllocator:
         """从交易所API获取账户余额并计算可用资金"""
         try:
             balance = self.connector.query_balance()
-            self.total_balance = balance.total
+            # 使用可用保证金（包括所有币种）而不是总余额
+            self.total_balance = balance.available  # 改为使用available（可用保证金）
             self.available_capital = self.total_balance * self.usage_ratio
             self.per_symbol_target = self.available_capital / self.max_symbols
 
             logger.info(
-                f"账户余额已更新: 总额 {self.total_balance:.2f} USDT, "
-                f"可用 {self.available_capital:.2f} USDT, "
+                f"账户余额已更新: 可用保证金 {self.total_balance:.2f} USDT, "
+                f"策略可用 {self.available_capital:.2f} USDT ({self.usage_ratio*100:.0f}%), "
                 f"每品种 {self.per_symbol_target:.2f} USDT"
             )
 

@@ -851,22 +851,26 @@ class GridStrategy:
         total_grids = len(upper_prices) + len(lower_prices)
 
         if is_upper:  # 上方网格成交（价格上涨）
-            max_upper_price = max(upper_prices) if upper_prices else 0
+            # 🔧 FIX: 移除边界检查，每个上方网格成交都扩展
 
-            # 检查是否为边界网格（价格差异小于0.1%）
-            if abs(filled_price - max_upper_price) / max_upper_price < 0.001:
-                # 1. 在上方添加新网格（更高价格 - 增加开空容量）
-                new_upper_price = round(current_price * (1 + spacing), 8)
-                self._place_single_upper_grid_by_price(symbol, grid_state, new_upper_price)
-                logger.info(f"{symbol} 滚动窗口：添加上方网格 @ {new_upper_price:.6f}")
+            # 检查是否达到数量限制
+            if total_grids >= max_total_grids:
+                logger.debug(f"{symbol} 已达最大网格数 {max_total_grids}，跳过扩展")
+                return
 
-                # 2. 移除最远的下方网格（减少止盈容量 - 保持平衡）
-                if lower_prices:
-                    min_lower_price = min(lower_prices)
-                    self._remove_grid_by_price(symbol, grid_state, min_lower_price, is_upper=False)
-                    logger.info(f"{symbol} 滚动窗口：移除最远下方网格 @ {min_lower_price:.6f} (保持平衡)")
+            # 1. 在最高价格之上添加新的上方网格
+            max_upper_price = max(upper_prices) if upper_prices else current_price
+            new_upper_price = round(max_upper_price * (1 + spacing), 8)
+            self._place_single_upper_grid_by_price(symbol, grid_state, new_upper_price)
+            logger.info(f"{symbol} 扩展：添加上方网格 @ {new_upper_price:.6f}")
 
-                # NET: +1 short capacity, -1 take-profit capacity (BALANCED)
+            # 2. 在成交价格对应的止盈位置添加新的下方网格
+            # 例如：$101.5 成交 → 止盈价格 = $101.5 / 1.015 ≈ $100
+            new_lower_price = round(filled_price / (1 + spacing), 8)
+            self._place_single_lower_grid_by_price(symbol, grid_state, new_lower_price)
+            logger.info(f"{symbol} 扩展：添加下方网格 @ {new_lower_price:.6f} (对应 {filled_price:.6f} 的止盈)")
+
+            # NET: +1 short capacity, +1 take-profit capacity (EXPANSION)
 
         else:  # 下方网格成交（价格下跌）
             min_lower_price = min(lower_prices) if lower_prices else float('inf')

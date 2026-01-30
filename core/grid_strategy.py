@@ -1206,7 +1206,7 @@ class GridStrategy:
         try:
             # 查询当前持仓
             positions = self.connector.query_positions()
-            short_position = next((p for p in positions if p.symbol == symbol and p.contracts < 0), None)
+            short_position = next((p for p in positions if p.symbol == symbol and p.side == 'short'), None)
 
             if not short_position:
                 logger.warning(f"{symbol} 基础仓位已完全平仓！")

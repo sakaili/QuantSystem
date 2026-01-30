@@ -193,6 +193,10 @@ class ExchangeConnector:
             # 构建订单参数
             params = {}
 
+            # 🔧 双向持仓模式：所有订单必须指定positionSide
+            # 纯空头策略：所有订单都操作SHORT仓位
+            params['positionSide'] = 'SHORT'
+
             # 只在需要reduce_only时才添加参数
             if reduce_only:
                 params['reduceOnly'] = True
@@ -206,7 +210,7 @@ class ExchangeConnector:
             # 下单
             logger.info(
                 f"下单: {symbol} {side} {amount} @ {price} "
-                f"(type={order_type}, post_only={post_only}, reduce_only={reduce_only})"
+                f"(type={order_type}, post_only={post_only}, reduce_only={reduce_only}, positionSide=SHORT)"
             )
 
             result = self.exchange.create_order(

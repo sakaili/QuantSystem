@@ -197,9 +197,11 @@ class ExchangeConnector:
             # 纯空头策略：所有订单都操作SHORT仓位
             params['positionSide'] = 'SHORT'
 
-            # 只在需要reduce_only时才添加参数
-            if reduce_only:
-                params['reduceOnly'] = True
+            # 🔧 双向持仓模式下不需要reduceOnly参数
+            # positionSide='SHORT' + side='buy' 已经隐含了"只减仓"的语义
+            # 发送reduceOnly会导致错误：-1106 "Parameter 'reduceonly' sent when not required"
+            # if reduce_only:
+            #     params['reduceOnly'] = True
 
             if post_only and order_type == 'limit':
                 params['timeInForce'] = 'GTX'  # Post-Only
@@ -210,7 +212,7 @@ class ExchangeConnector:
             # 下单
             logger.info(
                 f"下单: {symbol} {side} {amount} @ {price} "
-                f"(type={order_type}, post_only={post_only}, reduce_only={reduce_only}, positionSide=SHORT)"
+                f"(type={order_type}, post_only={post_only}, positionSide=SHORT)"
             )
 
             result = self.exchange.create_order(

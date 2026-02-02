@@ -261,9 +261,9 @@ class GridStrategy:
             validation_passed, validation_msg = self._validate_grid_creation(symbol, grid_state)
 
             if not validation_passed:
-                logger.error(f"网格验证失败: {validation_msg}, 开始清理...")
-                self._cleanup_failed_initialization(symbol, base_order_id)
-                return False
+                logger.warning(f"网格验证失败: {validation_msg}, 但继续运行（已禁用自动平仓）")
+                # 不再调用 _cleanup_failed_initialization，允许部分网格运行
+                # 后续的网格修复机制会自动补充缺失的网格
 
             # 7. 添加到仓位管理器
             self.position_mgr.add_position(symbol, entry_price)

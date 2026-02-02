@@ -31,7 +31,7 @@ grid:
 
 # 仓位配置 - Position Settings
 position:
-  max_symbols: 5                # 最多持仓币种数(5个品种同时交易)
+  max_symbols: 2                # 最多持仓币种数(2个品种同时交易)
   base_margin: 50.0             # 基础仓位保证金(USDT,每品种) - 核心空头持仓
   grid_margin: 10.5             # 单网格保证金(USDT,每品种) - 波动收益
   manual_symbols: [1000WHYUSDT]            # 手动指定必开币种(占用max_symbols配额), 例: ["BTCUSDT", "ETHUSDT"]

@@ -564,27 +564,22 @@ class GridStrategy:
             logger.warning(f"挂单失败 Grid-{level}: {e}")
 
     def _place_enhanced_lower_grid_order(self, symbol: str, grid_state: GridState, level: int) -> None:
-        """挂增强的下方止盈单（基础仓位1/10 + 网格仓位）"""
+        """挂下方止盈单（与开空单数量一致）"""
         if level not in grid_state.grid_prices.grid_levels:
             return
 
         price = grid_state.grid_prices.grid_levels[level]
 
-        # 计算总数量：基础仓位的1/total_levels + 网格仓位
-        base_margin = self.config.position.base_margin
+        # 🔧 FIX: 使用与开空单相同的数量（仅grid_margin）
         grid_margin = self.config.position.grid_margin
-
-        total_levels = len(grid_state.grid_prices.get_lower_levels())
-        base_amount = self._calculate_amount(symbol, base_margin / total_levels, grid_state.entry_price)
-        grid_amount = self._calculate_amount(symbol, grid_margin, price)
-        total_amount = base_amount + grid_amount
+        amount = self._calculate_amount(symbol, grid_margin, price)
 
         try:
-            logger.info(f"挂增强止盈单 Grid-{level}: {total_amount}张 × {price} (基础{base_amount}+网格{grid_amount})")
+            logger.info(f"挂止盈单 Grid-{level}: {amount}张 × {price}")
             order = self.connector.place_order_with_maker_retry(
                 symbol=symbol,
                 side='buy',
-                amount=total_amount,
+                amount=amount,
                 price=price,
                 order_type='limit',
                 post_only=True,
@@ -595,11 +590,12 @@ class GridStrategy:
             grid_state.lower_orders[level] = order.order_id
 
         except Exception as e:
-            logger.warning(f"挂增强止盈单失败 Grid-{level}: {e}")
+            logger.warning(f"挂止盈单失败 Grid-{level}: {e}")
 
     def _place_single_lower_grid(self, symbol: str, grid_state: GridState, level: int, price: float) -> None:
         """
         挂单个下方网格订单（用于滚动窗口添加新网格）
+        注意：此函数被下方同名函数覆盖，实际不会被调用
 
         Args:
             symbol: 交易对
@@ -608,14 +604,8 @@ class GridStrategy:
             price: 价格
         """
         try:
-            # 判断是否需要增强止盈单（如果对应的上方网格已成交）
-            opposite_level = abs(level)
-            if opposite_level in grid_state.filled_grids:
-                # 使用增强止盈单
-                self._place_enhanced_lower_grid_order(symbol, grid_state, level)
-            else:
-                # 使用基础止盈单
-                self._place_lower_grid_order(symbol, grid_state, level)
+            # 🔧 FIX: 使用与开空单相同的数量（仅grid_margin）
+            self._place_enhanced_lower_grid_order(symbol, grid_state, level)
         except Exception as e:
             logger.warning(f"挂下方网格失败 Grid{level}: {e}")
 
@@ -783,24 +773,14 @@ class GridStrategy:
             price: 目标价格
         """
         try:
-            # 判断是基础止盈还是增强止盈
-            total_levels = len(grid_state.grid_prices.get_lower_levels())
-            if level in grid_state.filled_grids:
-                # 已有对应上方开仓，补充增强止盈
-                base_margin = self.config.position.base_margin
-                grid_margin = self.config.position.grid_margin
-                base_amount = self._calculate_amount(symbol, base_margin / total_levels, grid_state.entry_price)
-                grid_amount = self._calculate_amount(symbol, grid_margin, price)
-                total_amount = base_amount + grid_amount
-            else:
-                # 仅基础止盈
-                base_margin = self.config.position.base_margin
-                total_amount = self._calculate_amount(symbol, base_margin / total_levels, grid_state.entry_price)
+            # 🔧 FIX: 使用与开空单相同的数量（仅grid_margin）
+            grid_margin = self.config.position.grid_margin
+            amount = self._calculate_amount(symbol, grid_margin, price)
 
             order = self.connector.place_order_with_maker_retry(
                 symbol=symbol,
                 side='buy',  # 平空止盈
-                amount=total_amount,
+                amount=amount,
                 price=price,
                 order_type='limit',
                 post_only=True,
@@ -861,8 +841,8 @@ class GridStrategy:
             self._place_single_upper_grid_by_price(symbol, grid_state, new_upper_price)
             logger.info(f"{symbol} 扩展：添加上方网格 @ {new_upper_price:.6f}")
 
-            # 2. 在成交价格对应的止盈位置添加增强止盈单
-            # 🔧 FIX Bug3: 添加能够完全平掉网格仓位的止盈单（基础+网格）
+            # 2. 在成交价格对应的止盈位置添加止盈单
+            # 🔧 FIX: 添加与开空单数量一致的止盈单（仅网格仓位）
             # 例如：$101.5 成交 → 止盈价格 = $101.5 / 1.015 ≈ $100
             new_lower_price = round(filled_price / (1 + spacing), 8)
 
@@ -877,11 +857,11 @@ class GridStrategy:
                 matched_lower_price=new_lower_price
             )
 
-            # 使用增强止盈单，能够平掉基础仓位+网格仓位
+            # 使用止盈单，与开空单数量一致
             self._place_enhanced_lower_grid_by_price(symbol, grid_state, new_lower_price, temp_fill)
             logger.info(
-                f"{symbol} 扩展：添加增强止盈单 @ {new_lower_price:.6f} "
-                f"(对应 {filled_price:.6f} 的网格仓位，能完全平仓)"
+                f"{symbol} 扩展：添加止盈单 @ {new_lower_price:.6f} "
+                f"(对应 {filled_price:.6f} 的网格仓位)"
             )
 
             # NET: +1 short capacity, +1 take-profit capacity (EXPANSION)
@@ -950,8 +930,6 @@ class GridStrategy:
         """
         挂单个下方网格订单（止盈单）
 
-        注意：下方网格数量取决于是否有对应的上方仓位已成交
-
         Args:
             symbol: 交易对
             grid_state: 网格状态
@@ -959,28 +937,14 @@ class GridStrategy:
             price: 价格
         """
         try:
-            # 判断是否有对应的上方仓位已成交
-            # Grid-5 对应 Grid+5
-            opposite_level = abs(level)
-
-            total_levels = len(grid_state.grid_prices.get_lower_levels())
-            if opposite_level in grid_state.filled_grids:
-                # 有对应仓位，使用增强止盈（基础仓位1/total_levels + 网格仓位）
-                base_margin = self.config.position.base_margin
-                grid_margin = self.config.position.grid_margin
-                base_amount = self._calculate_amount(symbol, base_margin / total_levels, grid_state.entry_price)
-                grid_amount = self._calculate_amount(symbol, grid_margin, price)
-                total_amount = base_amount + grid_amount
-                logger.debug(f"{symbol} 增强止盈: 基础{base_amount}张 + 网格{grid_amount}张")
-            else:
-                # 仅基础止盈
-                base_margin = self.config.position.base_margin
-                total_amount = self._calculate_amount(symbol, base_margin / total_levels, grid_state.entry_price)
+            # 🔧 FIX: 使用与开空单相同的数量（仅grid_margin）
+            grid_margin = self.config.position.grid_margin
+            amount = self._calculate_amount(symbol, grid_margin, price)
 
             order = self.connector.place_order_with_maker_retry(
                 symbol=symbol,
                 side='buy',  # 平空止盈
-                amount=total_amount,
+                amount=amount,
                 price=price,
                 order_type='limit',
                 post_only=True,
@@ -989,7 +953,7 @@ class GridStrategy:
             )
 
             grid_state.lower_orders[level] = order.order_id
-            logger.info(f"{symbol} 成功挂下方网格 Grid{level} @ {price:.6f}, {total_amount}张")
+            logger.info(f"{symbol} 成功挂下方网格 Grid{level} @ {price:.6f}, {amount}张")
 
         except Exception as e:
             logger.warning(f"{symbol} 挂下方网格失败 Grid{level}: {e}")
@@ -1126,7 +1090,7 @@ class GridStrategy:
         upper_fill: UpperGridFill
     ) -> None:
         """
-        挂增强止盈单（基础止盈 + 网格仓位，基于价格）
+        挂止盈单（与开空单数量一致，基于价格）
 
         Args:
             symbol: 交易对
@@ -1139,40 +1103,36 @@ class GridStrategy:
 
             # 🔧 FIX: 跨边价格验证 - 防止同价格买卖订单
             if price in grid_state.upper_orders:
-                logger.error(f"{symbol} ⚠️ 价格冲突：上方网格已存在 @ {price:.6f}，拒绝挂增强止盈单")
+                logger.error(f"{symbol} ⚠️ 价格冲突：上方网格已存在 @ {price:.6f}，拒绝挂止盈单")
                 return
 
-            # 计算增强止盈数量：基础仓位1/total_levels + 网格仓位
-            base_margin = self.config.position.base_margin
+            # 🔧 FIX: 使用与开空单相同的数量（仅grid_margin）
             grid_margin = self.config.position.grid_margin
-            total_levels = len(grid_state.grid_prices.get_lower_levels())
-            base_amount = self._calculate_amount(symbol, base_margin / total_levels, grid_state.entry_price)
-            grid_amount = self._calculate_amount(symbol, grid_margin, price)
-            total_amount = base_amount + grid_amount
+            amount = self._calculate_amount(symbol, grid_margin, price)
 
-            logger.debug(f"{symbol} 增强止盈: 基础{base_amount}张 + 网格{grid_amount}张 = {total_amount}张")
+            logger.debug(f"{symbol} 止盈单: {amount}张")
 
             # 验证总仓位不会超限
             is_safe, safe_amount, warning = self._validate_total_exposure_before_buy_order(
-                symbol, grid_state, total_amount
+                symbol, grid_state, amount
             )
 
             if not is_safe:
-                logger.error(f"{symbol} ⚠️ 拒绝挂增强止盈单 @ {price:.6f}: {warning}")
+                logger.error(f"{symbol} ⚠️ 拒绝挂止盈单 @ {price:.6f}: {warning}")
                 return
 
-            if safe_amount < total_amount:
-                logger.warning(f"{symbol} 调整增强止盈数量: {total_amount:.2f} → {safe_amount:.2f}张")
-                total_amount = safe_amount
+            if safe_amount < amount:
+                logger.warning(f"{symbol} 调整止盈数量: {amount:.2f} → {safe_amount:.2f}张")
+                amount = safe_amount
 
-            order = self._place_position_aware_buy_order(symbol, price, total_amount)
+            order = self._place_position_aware_buy_order(symbol, price, amount)
 
             if order:
                 grid_state.lower_orders[price] = order.order_id
-                logger.info(f"{symbol} 成功挂增强止盈单 @ {price:.6f}, {total_amount}张")
+                logger.info(f"{symbol} 成功挂止盈单 @ {price:.6f}, {amount}张")
 
         except Exception as e:
-            logger.warning(f"{symbol} 挂增强止盈单失败 @ {price:.6f}: {e}")
+            logger.warning(f"{symbol} 挂止盈单失败 @ {price:.6f}: {e}")
 
     def _remove_grid_by_price(self, symbol: str, grid_state: GridState, price: float, is_upper: bool) -> None:
         """
@@ -1361,7 +1321,7 @@ class GridStrategy:
                     except Exception as e:
                         logger.warning(f"撤单失败: {e}")
 
-                # 挂新的增强止盈单
+                # 挂新的止盈单
                 self._place_enhanced_lower_grid_by_price(symbol, grid_state, matched_lower_price, fill_info)
 
                 # 尝试扩展网格

@@ -306,9 +306,9 @@ class TradingBot:
             current_usage = 0.0
             for symbol in self.grid_strategy.grid_states.keys():
                 try:
-                    position = self.connector.get_position(symbol)
-                    if position and position.margin:
-                        current_usage += abs(position.margin)
+                    position = self.position_mgr.get_symbol_position(symbol)
+                    if position and position.total_margin_used:
+                        current_usage += abs(position.total_margin_used)
                 except Exception as e:
                     logger.warning(f"获取{symbol}保证金失败: {e}")
 

@@ -1246,9 +1246,9 @@ class GridStrategy:
             total_margin = 0.0
             for symbol, grid_state in self.grid_states.items():
                 try:
-                    position = self.connector.get_position(symbol)
-                    if position and position.margin:
-                        total_margin += abs(position.margin)
+                    position = self.position_mgr.get_symbol_position(symbol)
+                    if position and position.total_margin_used:
+                        total_margin += abs(position.total_margin_used)
                 except Exception as e:
                     logger.warning(f"获取{symbol}保证金失败: {e}")
 

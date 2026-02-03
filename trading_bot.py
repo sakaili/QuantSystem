@@ -290,6 +290,57 @@ class TradingBot:
         except Exception as e:
             logger.error(f"每日筛选失败: {e}", exc_info=True)
 
+    def _validate_capital_before_grid_init(self, required_margin: float, pending_count: int) -> bool:
+        """
+        验证初始化网格前资金是否充足且不超过90%限制
+
+        Args:
+            required_margin: 单个品种所需保证金
+            pending_count: 已经准备初始化的品种数量
+
+        Returns:
+            bool: True表示可以初始化，False表示资金不足或超限
+        """
+        try:
+            # 计算当前已使用的保证金
+            current_usage = 0.0
+            for symbol in self.grid_strategy.grid_states.keys():
+                try:
+                    position = self.connector.get_position(symbol)
+                    if position and position.margin:
+                        current_usage += abs(position.margin)
+                except Exception as e:
+                    logger.warning(f"获取{symbol}保证金失败: {e}")
+
+            # 计算新增保证金需求
+            new_margin = required_margin * (pending_count + 1)
+            total_usage = current_usage + new_margin
+
+            # 检查是否超过90%限制
+            available_capital = self.capital_allocator.available_capital
+            usage_pct = (total_usage / self.capital_allocator.total_balance) * 100
+
+            if total_usage > available_capital:
+                logger.error(
+                    f"⚠️ 资金超限：当前使用 {current_usage:.2f} USDT，"
+                    f"新增 {new_margin:.2f} USDT，"
+                    f"总计 {total_usage:.2f} USDT ({usage_pct:.1f}%)，"
+                    f"超过90%限制 ({available_capital:.2f} USDT)"
+                )
+                return False
+
+            logger.info(
+                f"资金验证通过：当前 {current_usage:.2f} USDT，"
+                f"新增 {new_margin:.2f} USDT，"
+                f"总计 {total_usage:.2f} USDT ({usage_pct:.1f}%)，"
+                f"限制 {available_capital:.2f} USDT (90%)"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"资金验证失败: {e}", exc_info=True)
+            return False
+
     def evaluate_new_entries(self, candidates: List[str]) -> None:
         """
         评估新入场机会
@@ -324,6 +375,11 @@ class TradingBot:
                 continue
 
             # 检查保证金
+            # 🔧 FIX: 添加90%资金约束验证
+            if not self._validate_capital_before_grid_init(required_margin, len(symbols_to_init)):
+                logger.warning("资金不足或超过90%限制,无法开新仓")
+                break
+
             if not self.position_mgr.can_open_new_position(required_margin):
                 logger.warning("保证金不足,无法开新仓")
                 break

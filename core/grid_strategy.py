@@ -861,11 +861,28 @@ class GridStrategy:
             self._place_single_upper_grid_by_price(symbol, grid_state, new_upper_price)
             logger.info(f"{symbol} 扩展：添加上方网格 @ {new_upper_price:.6f}")
 
-            # 2. 在成交价格对应的止盈位置添加新的下方网格
+            # 2. 在成交价格对应的止盈位置添加增强止盈单
+            # 🔧 FIX Bug3: 添加能够完全平掉网格仓位的止盈单（基础+网格）
             # 例如：$101.5 成交 → 止盈价格 = $101.5 / 1.015 ≈ $100
             new_lower_price = round(filled_price / (1 + spacing), 8)
-            self._place_single_lower_grid_by_price(symbol, grid_state, new_lower_price)
-            logger.info(f"{symbol} 扩展：添加下方网格 @ {new_lower_price:.6f} (对应 {filled_price:.6f} 的止盈)")
+
+            # 创建临时的UpperGridFill对象来记录这次成交
+            grid_margin = self.config.position.grid_margin
+            grid_amount = self._calculate_amount(symbol, grid_margin, filled_price)
+            temp_fill = UpperGridFill(
+                price=filled_price,
+                amount=grid_amount,
+                fill_time=datetime.now(timezone.utc),
+                order_id=f"expansion_{filled_price}",  # 临时ID
+                matched_lower_price=new_lower_price
+            )
+
+            # 使用增强止盈单，能够平掉基础仓位+网格仓位
+            self._place_enhanced_lower_grid_by_price(symbol, grid_state, new_lower_price, temp_fill)
+            logger.info(
+                f"{symbol} 扩展：添加增强止盈单 @ {new_lower_price:.6f} "
+                f"(对应 {filled_price:.6f} 的网格仓位，能完全平仓)"
+            )
 
             # NET: +1 short capacity, +1 take-profit capacity (EXPANSION)
 
@@ -878,31 +895,13 @@ class GridStrategy:
                 # 1. 在当前价格上方重新开空（profit taking + re-entry）
                 # 🔧 FIX 3: 使用当前价格计算重新开空价格，避免与恢复网格冲突
                 reopen_price = round(current_price * (1 + spacing), 8)
-                grid_margin = self.config.position.grid_margin
-                reopen_amount = self._calculate_amount(symbol, grid_margin, reopen_price)
 
-                try:
-                    # 下卖单重新开空
-                    sell_order = self.connector.place_order_with_maker_retry(
-                        symbol=symbol,
-                        side='sell',  # 开空
-                        amount=reopen_amount,
-                        price=reopen_price,
-                        order_type='limit',
-                        post_only=True,
-                        reduce_only=False,  # 开仓单
-                        max_retries=5
-                    )
-
-                    if sell_order:
-                        # 添加到上方网格（这是开空单）
-                        grid_state.upper_orders[reopen_price] = sell_order.order_id
-                        logger.info(
-                            f"{symbol} 滚动窗口：重新开空 @ {reopen_price:.6f} "
-                            f"({reopen_amount}张, 成交价={filled_price:.6f})"
-                        )
-                except Exception as e:
-                    logger.error(f"{symbol} 重新开空失败 @ {reopen_price:.6f}: {e}")
+                # 🔧 FIX: 使用统一的网格放置函数，包含跨边验证
+                self._place_single_upper_grid_by_price(symbol, grid_state, reopen_price)
+                logger.info(
+                    f"{symbol} 滚动窗口：重新开空 @ {reopen_price:.6f} "
+                    f"(成交价={filled_price:.6f})"
+                )
 
                 # 2. 移除最远的上方网格（保持窗口大小）
                 if upper_prices:
@@ -1045,6 +1044,11 @@ class GridStrategy:
                 logger.warning(f"{symbol} 上方网格已存在 @ {price:.6f}，跳过挂单")
                 return
 
+            # 🔧 FIX: 跨边价格验证 - 防止同价格买卖订单
+            if price in grid_state.lower_orders:
+                logger.error(f"{symbol} ⚠️ 价格冲突：下方网格已存在 @ {price:.6f}，拒绝挂上方网格")
+                return
+
             grid_margin = self.config.position.grid_margin
             amount = self._calculate_amount(symbol, grid_margin, price)
 
@@ -1079,6 +1083,11 @@ class GridStrategy:
             # 检查是否已存在
             if price in grid_state.lower_orders:
                 logger.debug(f"{symbol} 下方网格已存在 @ {price:.6f}")
+                return
+
+            # 🔧 FIX: 跨边价格验证 - 防止同价格买卖订单
+            if price in grid_state.upper_orders:
+                logger.error(f"{symbol} ⚠️ 价格冲突：上方网格已存在 @ {price:.6f}，拒绝挂下方网格")
                 return
 
             # 仅基础止盈（基础仓位的1/total_levels）
@@ -1127,6 +1136,11 @@ class GridStrategy:
         """
         try:
             price = round(price, 8)  # 统一精度
+
+            # 🔧 FIX: 跨边价格验证 - 防止同价格买卖订单
+            if price in grid_state.upper_orders:
+                logger.error(f"{symbol} ⚠️ 价格冲突：上方网格已存在 @ {price:.6f}，拒绝挂增强止盈单")
+                return
 
             # 计算增强止盈数量：基础仓位1/total_levels + 网格仓位
             base_margin = self.config.position.base_margin
@@ -1262,6 +1276,46 @@ class GridStrategy:
 
             except Exception as e:
                 logger.error(f"更新网格状态失败 {symbol}: {e}")
+
+        # 🔧 FIX: 添加运行时资金监控（每次更新后检查一次）
+        self._validate_total_capital_usage()
+
+    def _validate_total_capital_usage(self) -> None:
+        """验证总资金使用不超过90%限制"""
+        try:
+            total_margin = 0.0
+            for symbol, grid_state in self.grid_states.items():
+                try:
+                    position = self.connector.get_position(symbol)
+                    if position and position.margin:
+                        total_margin += abs(position.margin)
+                except Exception as e:
+                    logger.warning(f"获取{symbol}保证金失败: {e}")
+
+            # 获取资金分配器（通过position_manager）
+            if hasattr(self.position_mgr, 'capital_allocator'):
+                capital_allocator = self.position_mgr.capital_allocator
+            else:
+                # 如果没有capital_allocator，跳过验证
+                return
+
+            available_capital = capital_allocator.available_capital
+            total_balance = capital_allocator.total_balance
+            usage_pct = (total_margin / total_balance) * 100 if total_balance > 0 else 0
+
+            if total_margin > available_capital:
+                logger.error(
+                    f"⚠️ 资金超限：使用 {total_margin:.2f} USDT ({usage_pct:.1f}%)，"
+                    f"限制 {available_capital:.2f} USDT (90%)"
+                )
+            elif usage_pct > 85:
+                logger.warning(
+                    f"⚠️ 资金使用接近限制：{total_margin:.2f} USDT ({usage_pct:.1f}%)，"
+                    f"限制 {available_capital:.2f} USDT (90%)"
+                )
+
+        except Exception as e:
+            logger.warning(f"资金验证失败: {e}")
 
     def _update_single_grid(self, symbol: str, grid_state: GridState) -> None:
         """更新单个网格状态（基于价格）"""

@@ -166,6 +166,9 @@ class TradingBot:
         # 同步初始状态
         self.position_mgr.sync_positions()
 
+        # 启动时状态恢复和验证
+        self.restore_state_on_startup()
+
         monitor_interval = self.config_mgr.schedule.monitor_interval
 
         while self.running:
@@ -215,6 +218,91 @@ class TradingBot:
                 time.sleep(60)  # 异常后等待1分钟
 
         self.shutdown()
+
+    def restore_state_on_startup(self) -> None:
+        """启动时恢复和验证状态"""
+        logger.info("=" * 60)
+        logger.info("开始启动状态恢复和验证...")
+        logger.info("=" * 60)
+
+        try:
+            # 1. 获取实际持仓
+            actual_positions = {pos.symbol for pos in self.connector.query_positions()}
+            logger.info(f"实际持仓: {actual_positions if actual_positions else '无'}")
+
+            # 2. 获取所有挂单
+            all_open_orders = {}
+            for symbol in actual_positions:
+                try:
+                    orders = self.connector.query_open_orders(symbol)
+                    if orders:
+                        all_open_orders[symbol] = orders
+                        logger.info(f"{symbol} 有 {len(orders)} 个挂单")
+                except Exception as e:
+                    logger.warning(f"查询{symbol}挂单失败: {e}")
+
+            # 3. 检查grid_states中的币种
+            grid_symbols = set(self.grid_strategy.grid_states.keys())
+            logger.info(f"grid_states中的币种: {grid_symbols if grid_symbols else '无'}")
+
+            # 4. 清理孤儿grid_state（有grid_state但没有持仓）
+            orphan_grid_states = grid_symbols - actual_positions
+            if orphan_grid_states:
+                logger.warning(f"发现孤儿grid_state: {orphan_grid_states}")
+                for symbol in orphan_grid_states:
+                    logger.info(f"清理孤儿grid_state: {symbol}")
+                    # 取消所有订单
+                    try:
+                        self.connector.cancel_all_orders(symbol)
+                        logger.info(f"{symbol} 已取消所有订单")
+                    except Exception as e:
+                        logger.error(f"{symbol} 取消订单失败: {e}")
+
+                    # 从grid_states中移除
+                    if symbol in self.grid_strategy.grid_states:
+                        del self.grid_strategy.grid_states[symbol]
+                        logger.info(f"{symbol} 已从grid_states中移除")
+
+            # 5. 清理孤儿挂单（有挂单但没有持仓）
+            for symbol, orders in all_open_orders.items():
+                if symbol not in actual_positions:
+                    logger.warning(f"发现孤儿挂单: {symbol} 有 {len(orders)} 个挂单但没有持仓")
+                    try:
+                        self.connector.cancel_all_orders(symbol)
+                        logger.info(f"{symbol} 孤儿挂单已取消")
+                    except Exception as e:
+                        logger.error(f"{symbol} 取消孤儿挂单失败: {e}")
+
+            # 6. 重置资金分配器
+            logger.info("重置资金分配器...")
+            self.capital_allocator.allocations.clear()
+            self.capital_allocator.refresh_available_capital()
+
+            # 为实际持仓重新分配资金
+            for symbol in actual_positions:
+                try:
+                    self.capital_allocator.allocate_symbol(symbol)
+                    logger.info(f"{symbol} 资金分配已恢复")
+                except Exception as e:
+                    logger.error(f"{symbol} 资金分配失败: {e}")
+
+            # 7. 同步盈利监控
+            logger.info("同步盈利监控...")
+            for symbol in actual_positions:
+                position = self.position_mgr.get_symbol_position(symbol)
+                if position and symbol not in self.profit_monitor.get_monitored_symbols():
+                    self.profit_monitor.add_symbol(symbol, position.initial_margin or position.total_margin_used)
+                    logger.info(f"{symbol} 已添加到盈利监控")
+
+            logger.info("=" * 60)
+            logger.info("启动状态恢复完成")
+            logger.info(f"当前持仓: {len(actual_positions)}/{self.config_mgr.position.max_symbols}")
+            logger.info(f"grid_states: {len(self.grid_strategy.grid_states)}")
+            logger.info(f"资金分配: {len(self.capital_allocator.allocations)}")
+            logger.info("=" * 60)
+
+        except Exception as e:
+            logger.error(f"启动状态恢复失败: {e}", exc_info=True)
 
     def _should_scan_today(self) -> bool:
         """检查是否应该执行今日筛选"""

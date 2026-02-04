@@ -191,6 +191,11 @@ def build_candidates(
         if funding is not None and funding < FUNDING_RATE_FLOOR:
             continue
 
+        # 🔧 NEW: 指数成分必须包含Binance
+        if not fetcher.index_has_binance_component(symbol):
+            logger.info("Skip %s: index has no Binance component", symbol)
+            continue
+
         last = history.iloc[-1]
         ema30 = float(last["ema30"])
         close = float(last["close"])

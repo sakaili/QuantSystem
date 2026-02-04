@@ -238,6 +238,72 @@ class BinanceDataFetcher:
         return frame
 
     # ----------------------------------------------------------------------
+    # Index info helpers
+    # ----------------------------------------------------------------------
+    @staticmethod
+    def _symbol_to_market_id(symbol: str) -> str:
+        """Normalize ccxt symbol to Binance market id for index endpoints."""
+        return symbol.replace("/", "").replace(":USDT", "")
+
+    def fetch_index_info(self, symbol: str) -> Optional[Any]:
+        """
+        Fetch index info for a symbol from Binance futures public endpoint.
+
+        Returns raw response (list or dict) or None if unavailable.
+        """
+        market_id = self._symbol_to_market_id(symbol)
+        params = {"symbol": market_id}
+
+        try:
+            # ccxt binanceusdm exposes fapiPublicGetIndexInfo in most versions
+            if hasattr(self.exchange, "fapiPublicGetIndexInfo"):
+                return self.exchange.fapiPublicGetIndexInfo(params)
+            # Fallback to generic request if method is missing
+            return self.exchange.request("indexInfo", "fapiPublic", "GET", params)
+        except Exception as exc:
+            logger.warning("Index info fetch failed %s: %s", symbol, exc)
+            return None
+
+    def index_has_binance_component(self, symbol: str) -> bool:
+        """
+        Check whether a symbol's index composition includes Binance.
+
+        Returns False if index info is unavailable or does not include Binance.
+        """
+        data = self.fetch_index_info(symbol)
+        if not data:
+            return False
+
+        market_id = self._symbol_to_market_id(symbol)
+        entries = data if isinstance(data, list) else [data]
+
+        for entry in entries:
+            entry_symbol = entry.get("symbol") or entry.get("pair") or entry.get("s")
+            if entry_symbol and entry_symbol != market_id:
+                continue
+
+            components = (
+                entry.get("components")
+                or entry.get("constituents")
+                or entry.get("component")
+                or entry.get("indexComponents")
+                or []
+            )
+
+            for component in components:
+                exchange_name = (
+                    component.get("exchange")
+                    or component.get("exchangeName")
+                    or component.get("source")
+                    or component.get("name")
+                    or ""
+                )
+                if "binance" in str(exchange_name).lower():
+                    return True
+
+        return False
+
+    # ----------------------------------------------------------------------
     # OHLCV history + indicators
     # ----------------------------------------------------------------------
     def fetch_klines(

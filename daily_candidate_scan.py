@@ -192,7 +192,8 @@ def build_candidates(
             continue
 
         # 🔧 NEW: 指数成分必须包含Binance
-        if not fetcher.index_has_binance_component(symbol):
+        market_id = meta_map[symbol].market_id if symbol in meta_map else None
+        if not fetcher.index_has_binance_component(symbol, market_id=market_id):
             logger.info("Skip %s: index has no Binance component", symbol)
             continue
 

@@ -243,16 +243,16 @@ class BinanceDataFetcher:
     @staticmethod
     def _symbol_to_market_id(symbol: str) -> str:
         """Normalize ccxt symbol to Binance market id for index endpoints."""
-        return symbol.replace("/", "").replace(":USDT", "")
+        return symbol.replace("/", "").replace(":", "")
 
-    def fetch_index_info(self, symbol: str) -> Optional[Any]:
+    def fetch_index_info(self, symbol: str, market_id: Optional[str] = None) -> Optional[Any]:
         """
         Fetch index info for a symbol from Binance futures public endpoint.
 
         Returns raw response (list or dict) or None if unavailable.
         """
-        market_id = self._symbol_to_market_id(symbol)
-        params = {"symbol": market_id}
+        target_id = market_id or self._symbol_to_market_id(symbol)
+        params = {"symbol": target_id}
 
         try:
             # ccxt binanceusdm exposes fapiPublicGetIndexInfo in most versions
@@ -261,25 +261,25 @@ class BinanceDataFetcher:
             # Fallback to generic request if method is missing
             return self.exchange.request("indexInfo", "fapiPublic", "GET", params)
         except Exception as exc:
-            logger.warning("Index info fetch failed %s: %s", symbol, exc)
+            logger.warning("Index info fetch failed %s (%s): %s", symbol, target_id, exc)
             return None
 
-    def index_has_binance_component(self, symbol: str) -> bool:
+    def index_has_binance_component(self, symbol: str, market_id: Optional[str] = None) -> bool:
         """
         Check whether a symbol's index composition includes Binance.
 
         Returns False if index info is unavailable or does not include Binance.
         """
-        data = self.fetch_index_info(symbol)
+        data = self.fetch_index_info(symbol, market_id=market_id)
         if not data:
             return False
 
-        market_id = self._symbol_to_market_id(symbol)
+        target_id = market_id or self._symbol_to_market_id(symbol)
         entries = data if isinstance(data, list) else [data]
 
         for entry in entries:
             entry_symbol = entry.get("symbol") or entry.get("pair") or entry.get("s")
-            if entry_symbol and entry_symbol != market_id:
+            if entry_symbol and entry_symbol != target_id:
                 continue
 
             components = (

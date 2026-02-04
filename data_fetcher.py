@@ -255,19 +255,20 @@ class BinanceDataFetcher:
 
     def fetch_index_info(self, symbol: str, market_id: Optional[str] = None) -> Optional[Any]:
         """
-        Fetch index info for a symbol from Binance futures public endpoint.
+        Fetch index constituents for a symbol from Binance futures public endpoint.
 
-        Returns raw response (list or dict) or None if unavailable.
+        Endpoint: GET /fapi/v1/constituents
+        Returns raw response (dict) or None if unavailable.
         """
         target_id = market_id or self._symbol_to_market_id(symbol)
         params = {"symbol": target_id}
 
         try:
-            # ccxt binanceusdm exposes fapiPublicGetIndexInfo in most versions
-            if hasattr(self.exchange, "fapiPublicGetIndexInfo"):
-                return self.exchange.fapiPublicGetIndexInfo(params)
+            # ccxt binanceusdm exposes fapiPublicGetConstituents in recent versions
+            if hasattr(self.exchange, "fapiPublicGetConstituents"):
+                return self.exchange.fapiPublicGetConstituents(params)
             # Fallback to generic request if method is missing
-            return self.exchange.request("indexInfo", "fapiPublic", "GET", params)
+            return self.exchange.request("constituents", "fapiPublic", "GET", params)
         except Exception as exc:
             # Binance returns -1121 for invalid symbol; treat as "no index info"
             if "-1121" in str(exc):

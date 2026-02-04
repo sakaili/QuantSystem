@@ -100,6 +100,19 @@ class PositionManager:
             # 查询持仓
             positions = self.connector.query_positions()
 
+            # 获取当前持仓的symbol集合
+            current_symbols = {pos.symbol for pos in positions}
+
+            # 移除已平仓的币种
+            symbols_to_remove = []
+            for symbol in list(self.positions.keys()):
+                if symbol not in current_symbols:
+                    symbols_to_remove.append(symbol)
+                    logger.info(f"{symbol} 持仓已完全平仓，从positions中移除")
+
+            for symbol in symbols_to_remove:
+                del self.positions[symbol]
+
             # 更新持仓字典
             for pos in positions:
                 symbol = pos.symbol

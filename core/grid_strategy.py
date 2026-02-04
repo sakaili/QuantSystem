@@ -95,6 +95,7 @@ class GridState:
     grid_integrity_validated: bool = False  # 是否通过初始验证
     upper_success_rate: float = 0.0         # 上方网格创建成功率
     lower_success_rate: float = 0.0         # 下方网格创建成功率
+    needs_cleanup: bool = False             # 是否需要清理（仓位完全平仓时标记）
 
 
 class GridStrategy:
@@ -1180,7 +1181,17 @@ class GridStrategy:
             short_position = next((p for p in positions if p.symbol == symbol and p.side == 'short'), None)
 
             if not short_position:
-                logger.warning(f"{symbol} 基础仓位已完全平仓！")
+                logger.error(f"{symbol} 基础仓位已完全平仓！触发紧急清理")
+                # 标记为不健康，停止网格修复
+                self._unhealthy_symbols.add(symbol)
+                # 取消所有订单
+                try:
+                    self.connector.cancel_all_orders(symbol)
+                    logger.info(f"{symbol} 已取消所有订单")
+                except Exception as e:
+                    logger.error(f"{symbol} 取消订单失败: {e}")
+                # 标记需要清理（在trading_bot中处理）
+                grid_state.needs_cleanup = True
                 return
 
             current_amount = abs(short_position.contracts)

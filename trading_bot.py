@@ -182,6 +182,9 @@ class TradingBot:
                 # 3. 更新网格状态
                 self.update_all_grids()
 
+                # 3.4. 清理孤儿grid_state
+                self.cleanup_orphan_grid_states()
+
                 # 3.5. 盈利监控与换仓(如果启用)
                 if self.config_mgr.rebalancing.enabled:
                     self.monitor_profit_rebalancing()
@@ -495,6 +498,43 @@ class TradingBot:
     def update_all_grids(self) -> None:
         """更新所有网格状态"""
         self.grid_strategy.update_grid_states()
+
+    def cleanup_orphan_grid_states(self) -> None:
+        """清理孤儿grid_state（仓位已平但grid_state仍存在）"""
+        symbols_to_cleanup = []
+
+        # 检查所有grid_state
+        for symbol, grid_state in list(self.grid_strategy.grid_states.items()):
+            if grid_state.needs_cleanup:
+                symbols_to_cleanup.append(symbol)
+
+        # 清理标记的grid_state
+        for symbol in symbols_to_cleanup:
+            logger.warning(f"{symbol} 检测到孤儿grid_state，开始清理")
+            try:
+                # 从grid_states中移除
+                if symbol in self.grid_strategy.grid_states:
+                    del self.grid_strategy.grid_states[symbol]
+                    logger.info(f"{symbol} 已从grid_states中移除")
+
+                # 释放资金分配
+                if self.capital_allocator:
+                    freed_margin = self.capital_allocator.free_symbol(symbol)
+                    logger.info(f"{symbol} 释放资金: {freed_margin:.2f} USDT")
+
+                # 从盈利监控中移除
+                if symbol in self.profit_monitor.get_monitored_symbols():
+                    self.profit_monitor.remove_symbol(symbol)
+                    logger.info(f"{symbol} 已从盈利监控中移除")
+
+                # 从不健康币种集合中移除
+                if symbol in self.grid_strategy._unhealthy_symbols:
+                    self.grid_strategy._unhealthy_symbols.remove(symbol)
+
+                logger.info(f"{symbol} 孤儿grid_state清理完成")
+
+            except Exception as e:
+                logger.error(f"{symbol} 清理孤儿grid_state失败: {e}", exc_info=True)
 
     def handle_risk_alerts(self) -> None:
         """处理风险预警"""

@@ -59,6 +59,16 @@ def _ensure_utc(dt: datetime) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
+def _safe_to_datetime(value: Any) -> Optional[pd.Timestamp]:
+    """Parse timestamps safely without deprecated errors='ignore'."""
+    if value in (None, "", "null"):
+        return None
+    try:
+        return pd.to_datetime(value, utc=True)
+    except Exception:
+        return None
+
+
 @dataclass(frozen=True)
 class SymbolMetadata:
     """Basic metadata for a Binance USDT perpetual contract."""
@@ -225,9 +235,7 @@ class BinanceDataFetcher:
                         or info.get("volumeQuote")
                     ),
                     "funding_rate": _safe_float(info.get("lastFundingRate")),
-                    "next_funding_time": pd.to_datetime(
-                        info.get("nextFundingTime"), utc=True, errors="ignore"
-                    ),
+                    "next_funding_time": _safe_to_datetime(info.get("nextFundingTime")),
                     "open_interest": _safe_float(info.get("openInterest")),
                     # Binance does not publish perp market cap. Keep optional.
                     "market_cap": _safe_float(info.get("marketCap")),
@@ -261,6 +269,10 @@ class BinanceDataFetcher:
             # Fallback to generic request if method is missing
             return self.exchange.request("indexInfo", "fapiPublic", "GET", params)
         except Exception as exc:
+            # Binance returns -1121 for invalid symbol; treat as "no index info"
+            if "-1121" in str(exc):
+                logger.info("Index info not available %s (%s)", symbol, target_id)
+                return None
             logger.warning("Index info fetch failed %s (%s): %s", symbol, target_id, exc)
             return None
 

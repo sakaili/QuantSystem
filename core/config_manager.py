@@ -67,6 +67,20 @@ class ScreeningConfig:
     min_listing_days: int       # 最小上市天数
     funding_rate_floor: float   # 资金费率下限
     atr_spike_multiplier: float # ATR暴涨倍数
+    funding_rate_sort: bool = False  # 是否按历史资金费率排序
+    funding_rate_lookback_days: int = 365  # 资金费率统计窗口(0=尽可能全历史)
+    funding_rate_min_sum: float = 0.0  # 最小累计资金费率(筛选用)
+    eth_deviation_filter: bool = False  # 是否启用ETH偏离筛选
+    eth_deviation_window: int = 60      # 滚动窗口(天)
+    eth_deviation_cooldown_days: int = 30  # 最近N天发生偏离直接剔除
+    eth_deviation_rate_window_days: int = 180  # 统计偏离频率窗口
+    eth_deviation_ever: bool = False     # 只要历史窗口内发生过偏离就剔除
+    eth_corr_drop_threshold: float = 0.2       # corr_drop阈值
+    eth_corr_drop_rate_limit: float = 0.05     # corr_drop频率上限
+    eth_residual_z: float = 2.5                # 残差z阈值
+    eth_residual_rate_limit: float = 0.01      # 残差偏离频率上限
+    binance_component_max_weight: float = 0.8  # Binance成分占比上限(<=80%)
+    binance_component_weight_strict: bool = True  # 无法获取占比时是否剔除
 
 
 @dataclass
@@ -369,6 +383,10 @@ class ConfigManager:
         # 验证止损配置
         if self.stop_loss.ratio <= 1.0:
             raise ConfigurationError("止损比例必须大于1.0")
+
+        # 验证资金费率排序窗口
+        if self.screening.funding_rate_lookback_days < 0:
+            raise ConfigurationError("资金费率统计窗口不能为负数")
 
         # 验证盈利止盈配置
         if self.profit_taking.threshold <= 0:

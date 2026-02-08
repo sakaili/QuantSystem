@@ -45,6 +45,20 @@ screening:
   min_listing_days: 365         # 最小上市天数
   funding_rate_floor: 0.0       # 资金费率下限(>0,多头付费给空头)
   atr_spike_multiplier: 3.0     # ATR暴涨倍数阈值
+  funding_rate_sort: true       # 是否按历史累计资金费率排序
+  funding_rate_lookback_days: 0 # 统计窗口(0=尽可能全历史)
+  funding_rate_min_sum: 0.0     # 最小累计资金费率(筛选用)
+  eth_deviation_filter: true    # 启用ETH偏离筛选
+  eth_deviation_window: 60      # 滚动窗口(天)
+  eth_deviation_cooldown_days: 365       # 最近N天发生偏离直接剔除
+  eth_deviation_rate_window_days: 180    # 统计偏离频率窗口
+  eth_deviation_ever: true               # 只要历史窗口内发生过偏离就剔除
+  eth_corr_drop_threshold: 0.2           # corr_drop阈值
+  eth_corr_drop_rate_limit: 0.05         # corr_drop频率上限
+  eth_residual_z: 2.5                    # 残差z阈值
+  eth_residual_rate_limit: 0.01          # 残差偏离频率上限
+  binance_component_max_weight: 0.8      # Binance成分占比上限(<=80%)
+  binance_component_weight_strict: true  # 无法获取占比时是否剔除
 
 # 交易时间 - Schedule
 schedule:

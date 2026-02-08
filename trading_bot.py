@@ -329,6 +329,22 @@ class TradingBot:
                 bottom_n=self.config_mgr.screening.bottom_n,
                 timeframe="1d",
                 funding_cooldown=0.2,
+                funding_rate_floor=self.config_mgr.screening.funding_rate_floor,
+                atr_spike_multiplier=self.config_mgr.screening.atr_spike_multiplier,
+                funding_rate_sort=self.config_mgr.screening.funding_rate_sort,
+                funding_rate_lookback_days=self.config_mgr.screening.funding_rate_lookback_days,
+                funding_rate_min_sum=self.config_mgr.screening.funding_rate_min_sum,
+                eth_deviation_filter=self.config_mgr.screening.eth_deviation_filter,
+                eth_deviation_window=self.config_mgr.screening.eth_deviation_window,
+                eth_deviation_cooldown_days=self.config_mgr.screening.eth_deviation_cooldown_days,
+                eth_deviation_rate_window_days=self.config_mgr.screening.eth_deviation_rate_window_days,
+                eth_deviation_ever=self.config_mgr.screening.eth_deviation_ever,
+                eth_corr_drop_threshold=self.config_mgr.screening.eth_corr_drop_threshold,
+                eth_corr_drop_rate_limit=self.config_mgr.screening.eth_corr_drop_rate_limit,
+                eth_residual_z=self.config_mgr.screening.eth_residual_z,
+                eth_residual_rate_limit=self.config_mgr.screening.eth_residual_rate_limit,
+                binance_component_max_weight=self.config_mgr.screening.binance_component_max_weight,
+                binance_component_weight_strict=self.config_mgr.screening.binance_component_weight_strict,
                 fetcher=self.data_fetcher
             )
 

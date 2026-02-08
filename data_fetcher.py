@@ -251,7 +251,8 @@ class BinanceDataFetcher:
     @staticmethod
     def _symbol_to_market_id(symbol: str) -> str:
         """Normalize ccxt symbol to Binance market id for index endpoints."""
-        return symbol.replace("/", "").replace(":", "")
+        base = symbol.split(":")[0]
+        return base.replace("/", "")
 
     def fetch_index_info(self, symbol: str, market_id: Optional[str] = None) -> Optional[Any]:
         """
@@ -275,7 +276,87 @@ class BinanceDataFetcher:
                 logger.info("Index info not available %s (%s)", symbol, target_id)
                 return None
             logger.warning("Index info fetch failed %s (%s): %s", symbol, target_id, exc)
-            return None
+        return None
+
+    # ----------------------------------------------------------------------
+    # Funding rate history
+    # ----------------------------------------------------------------------
+    def fetch_funding_rate_history(
+        self,
+        symbol: str,
+        *,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+        limit: int = 1000,
+        max_pages: int = 50,
+    ) -> pd.DataFrame:
+        """
+        Fetch funding rate history for a symbol from Binance futures endpoint.
+
+        Returns a dataframe with columns: timestamp, funding_rate.
+        """
+        end = end or datetime.now(timezone.utc)
+        start = start or datetime(2019, 1, 1, tzinfo=timezone.utc)
+        start = _ensure_utc(start)
+        end = _ensure_utc(end)
+
+        target_id = self._symbol_to_market_id(symbol)
+        start_ms = int(start.timestamp() * 1000)
+        end_ms = int(end.timestamp() * 1000)
+
+        rows: List[Dict[str, Any]] = []
+        page = 0
+        cursor = start_ms
+
+        while cursor < end_ms and page < max_pages:
+            params = {
+                "symbol": target_id,
+                "startTime": cursor,
+                "endTime": end_ms,
+                "limit": limit,
+            }
+            try:
+                if hasattr(self.exchange, "fapiPublicGetFundingRate"):
+                    data = self.exchange.fapiPublicGetFundingRate(params)
+                else:
+                    data = self.exchange.request("fundingRate", "fapiPublic", "GET", params)
+            except Exception as exc:
+                logger.warning("Funding history fetch failed %s: %s", symbol, exc)
+                break
+
+            if not data:
+                break
+
+            for entry in data:
+                ts = entry.get("fundingTime") or entry.get("time")
+                rate = entry.get("fundingRate")
+                if ts is None:
+                    continue
+                rows.append(
+                    {
+                        "timestamp": pd.to_datetime(int(ts), unit="ms", utc=True),
+                        "funding_rate": _safe_float(rate),
+                    }
+                )
+
+            last_ts = data[-1].get("fundingTime") or data[-1].get("time")
+            if last_ts is None:
+                break
+
+            cursor = int(last_ts) + 1
+            page += 1
+
+            if len(data) < limit:
+                break
+
+        if not rows:
+            return pd.DataFrame(columns=["timestamp", "funding_rate"])
+
+        frame = pd.DataFrame(rows)
+        frame.dropna(subset=["funding_rate"], inplace=True)
+        frame.sort_values("timestamp", inplace=True)
+        frame.reset_index(drop=True, inplace=True)
+        return frame
 
     def index_has_binance_component(self, symbol: str, market_id: Optional[str] = None) -> bool:
         """
@@ -315,6 +396,65 @@ class BinanceDataFetcher:
                     return True
 
         return False
+
+    def index_binance_component_weight(self, symbol: str, market_id: Optional[str] = None) -> Optional[float]:
+        """
+        Return the total Binance weight in the index components (0.0-1.0), or None if unavailable.
+        """
+        data = self.fetch_index_info(symbol, market_id=market_id)
+        if not data:
+            return None
+
+        target_id = market_id or self._symbol_to_market_id(symbol)
+        entries = data if isinstance(data, list) else [data]
+
+        total_weight = 0.0
+        found = False
+
+        for entry in entries:
+            entry_symbol = entry.get("symbol") or entry.get("pair") or entry.get("s")
+            if entry_symbol and entry_symbol != target_id:
+                continue
+
+            components = (
+                entry.get("components")
+                or entry.get("constituents")
+                or entry.get("component")
+                or entry.get("indexComponents")
+                or []
+            )
+
+            for component in components:
+                exchange_name = (
+                    component.get("exchange")
+                    or component.get("exchangeName")
+                    or component.get("source")
+                    or component.get("name")
+                    or ""
+                )
+                if "binance" not in str(exchange_name).lower():
+                    continue
+
+                weight = (
+                    component.get("weight")
+                    or component.get("weightInPercent")
+                    or component.get("w")
+                    or component.get("weight_percent")
+                    or component.get("percentage")
+                )
+
+                weight_value = _safe_float(weight)
+                if weight_value is None:
+                    continue
+
+                # If weight looks like percent (e.g., 12.3), convert to fraction.
+                if weight_value > 1.0:
+                    weight_value = weight_value / 100.0
+
+                total_weight += weight_value
+                found = True
+
+        return total_weight if found else None
 
     # ----------------------------------------------------------------------
     # OHLCV history + indicators

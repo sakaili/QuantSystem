@@ -4,7 +4,7 @@ version: "1.0"
 
 # 止损配置 - Stop Loss Settings
 stop_loss:
-  ratio: 1.20                   # 止损线(1.20×P0, 即20%止损)
+  ratio: 1.50                   # 止损线(1.50×P0, 即50%止损)
   order_type: "market"          # 止损订单类型
 
 # 止盈配置 - Take Profit Settings

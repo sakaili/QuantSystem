@@ -9,6 +9,7 @@ __pycache__/
 
 # 数据和日志
 logs/
+experiments/
 data/database.db
 data/daily_scans/*.csv
 *.log

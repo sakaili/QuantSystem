@@ -437,13 +437,52 @@ class GridStrategy:
         del self.grid_states[symbol]
         logger.info(f"清理完成: {symbol}")
 
+    def _get_open_orders_safe(self, symbol: str) -> List[Order]:
+        """Query open orders safely for dedupe checks."""
+        try:
+            return self.connector.query_open_orders(symbol)
+        except Exception as e:
+            logger.warning(f"{symbol} query open orders failed, skip dedupe: {e}")
+            return []
+
+    def _match_open_order_by_price(
+        self,
+        open_orders: List[Order],
+        side: str,
+        target_price: float,
+        tolerance: float = 0.001
+    ) -> Optional[str]:
+        """Find an existing open order within tolerance by price."""
+        for order in open_orders:
+            if order.side != side or order.price is None:
+                continue
+            order_price = round(order.price, 8)
+            if abs(order_price - target_price) / target_price < tolerance:
+                return order.order_id
+        return None
+
     def _place_upper_grid_orders(self, symbol: str, grid_state: GridState) -> None:
         """挂上方网格订单(开空) - 使用价格作为标识"""
         grid_margin = self.config.position.grid_margin
+        open_orders = self._get_open_orders_safe(symbol)
 
         for level in grid_state.grid_prices.get_upper_levels():
             try:
                 price = round(grid_state.grid_prices.grid_levels[level], 8)
+                if price in grid_state.upper_orders:
+                    continue
+                if price in grid_state.lower_orders:
+                    logger.error(
+                        f"{symbol} price collision: lower grid already exists @ {price:.6f}, skip upper"
+                    )
+                    continue
+
+                existing_id = self._match_open_order_by_price(open_orders, "sell", price)
+                if existing_id:
+                    grid_state.upper_orders[price] = existing_id
+                    logger.info(f"{symbol} upper grid already open @ {price:.6f}, skip")
+                    continue
+
                 amount = self._calculate_amount(symbol, grid_margin, price)
 
                 logger.debug(f"挂上方网格 @ {price:.6f}: {amount}张")
@@ -465,10 +504,25 @@ class GridStrategy:
     def _place_lower_grid_orders(self, symbol: str, grid_state: GridState) -> None:
         """挂下方网格订单(平空止盈)"""
         grid_margin = self.config.position.grid_margin
+        open_orders = self._get_open_orders_safe(symbol)
 
         for level in grid_state.grid_prices.get_lower_levels():
             try:
-                price = grid_state.grid_prices.grid_levels[level]
+                price = round(grid_state.grid_prices.grid_levels[level], 8)
+                if price in grid_state.lower_orders:
+                    continue
+                if price in grid_state.upper_orders:
+                    logger.error(
+                        f"{symbol} price collision: upper grid already exists @ {price:.6f}, skip lower"
+                    )
+                    continue
+
+                existing_id = self._match_open_order_by_price(open_orders, "buy", price)
+                if existing_id:
+                    grid_state.lower_orders[price] = existing_id
+                    logger.info(f"{symbol} lower grid already open @ {price:.6f}, skip")
+                    continue
+
                 amount = self._calculate_amount(symbol, grid_margin, price)
 
                 logger.debug(f"挂下方网格 Grid-{level}: {amount}张 × {price}")
@@ -483,7 +537,7 @@ class GridStrategy:
                     max_retries=5
                 )
 
-                grid_state.lower_orders[level] = order.order_id
+                grid_state.lower_orders[price] = order.order_id
 
             except Exception as e:
                 logger.warning(f"挂单失败 Grid-{level}: {e}")
@@ -491,23 +545,31 @@ class GridStrategy:
     def _place_base_position_take_profit(self, symbol: str, grid_state: GridState) -> None:
         """挂基础仓位的分层止盈单（限制数量以保留最小仓位）"""
         base_margin = self.config.position.base_margin
+        grid_margin = self.config.position.grid_margin
+        open_orders = self._get_open_orders_safe(symbol)
         min_ratio = self.config.position.min_base_position_ratio
 
         # 计算可平仓的比例
         closeable_ratio = 1.0 - min_ratio  # 例如：1.0 - 0.3 = 0.7
+        closeable_margin = base_margin * closeable_ratio
 
         # 获取所有下方网格层级
         lower_levels = grid_state.grid_prices.get_lower_levels()
         total_levels = len(lower_levels)
 
         # 计算允许挂止盈单的层数（向下取整）
-        allowed_levels = int(total_levels * closeable_ratio)  # 例如：10 × 0.7 = 7
+        allowed_levels_by_ratio = int(total_levels * closeable_ratio)  # e.g. 10 * 0.7 = 7
+        allowed_levels_by_margin = int(closeable_margin // grid_margin) if grid_margin > 0 else 0
+        allowed_levels = min(allowed_levels_by_ratio, allowed_levels_by_margin)
 
         # 每层数量（仍然按总层数计算，保持每层数量一致）
-        base_amount_per_level = self._calculate_amount(symbol, base_margin / total_levels, grid_state.entry_price)
+        base_amount_per_level = self._calculate_amount(symbol, grid_margin, grid_state.entry_price)
 
         logger.info(f"挂基础仓位止盈单: {allowed_levels}/{total_levels}层, 每层{base_amount_per_level:.1f}张")
         logger.info(f"保留最小仓位: {min_ratio*100:.0f}% = {base_amount_per_level * (total_levels - allowed_levels):.1f}张")
+        if allowed_levels <= 0:
+            logger.info(f"{symbol} base TP levels = 0, keep minimum base position")
+            return
 
         # 只挂允许的层数（从最近的开始，即从Grid-1开始）
         for i, level in enumerate(sorted(lower_levels, reverse=True)):
@@ -520,6 +582,26 @@ class GridStrategy:
                 logger.debug(f"挂基础止盈 @ {price:.6f}: {base_amount_per_level:.1f}张")
 
                 # 使用仓位感知的买单
+                if price in grid_state.lower_orders:
+                    continue
+                if price in grid_state.upper_orders:
+                    logger.error(
+                        f"{symbol} price collision: upper grid already exists @ {price:.6f}, skip base TP"
+                    )
+                    continue
+
+                existing_id = self._match_open_order_by_price(open_orders, "buy", price)
+                if existing_id:
+                    grid_state.lower_orders[price] = existing_id
+                    logger.info(f"{symbol} base TP already open @ {price:.6f}, skip")
+                    continue
+
+                is_safe, safe_amount, warning = self._validate_total_exposure_before_buy_order(
+                    symbol, grid_state, base_amount_per_level
+                )
+                if not is_safe:
+                    logger.warning(f"{symbol} base TP blocked: {warning}")
+                    break
                 order = self._place_position_aware_buy_order(symbol, price, base_amount_per_level)
 
                 if order:
@@ -542,9 +624,8 @@ class GridStrategy:
             return
 
         price = grid_state.grid_prices.grid_levels[level]
-        base_margin = self.config.position.base_margin
-        total_levels = len(grid_state.grid_prices.get_lower_levels())
-        base_amount_per_level = self._calculate_amount(symbol, base_margin / total_levels, grid_state.entry_price)
+        grid_margin = self.config.position.grid_margin
+        base_amount_per_level = self._calculate_amount(symbol, grid_margin, grid_state.entry_price)
 
         try:
             logger.debug(f"重新挂基础止盈单 Grid-{level}: {base_amount_per_level}张 × {price}")
@@ -994,24 +1075,27 @@ class GridStrategy:
 
     def _place_single_upper_grid_by_price(self, symbol: str, grid_state: GridState, price: float) -> None:
         """
-        挂单个上方网格订单（基于价格）
-
-        Args:
-            symbol: 交易对
-            grid_state: 网格状态
-            price: 价格
+        Place a single upper grid order by price.
         """
         try:
-            price = round(price, 8)  # 统一精度
+            price = round(price, 8)
 
-            # 检查是否已存在
             if price in grid_state.upper_orders:
-                logger.warning(f"{symbol} 上方网格已存在 @ {price:.6f}，跳过挂单")
+                logger.warning(f"{symbol} upper grid already exists @ {price:.6f}, skip")
                 return
 
-            # 🔧 FIX: 跨边价格验证 - 防止同价格买卖订单
             if price in grid_state.lower_orders:
-                logger.error(f"{symbol} ⚠️ 价格冲突：下方网格已存在 @ {price:.6f}，拒绝挂上方网格")
+                logger.error(
+                    f"{symbol} price collision: lower grid already exists @ {price:.6f}, skip upper"
+                )
+                return
+
+            existing_id = self._match_open_order_by_price(
+                self._get_open_orders_safe(symbol), "sell", price
+            )
+            if existing_id:
+                grid_state.upper_orders[price] = existing_id
+                logger.info(f"{symbol} upper grid already open @ {price:.6f}, skip")
                 return
 
             grid_margin = self.config.position.grid_margin
@@ -1019,7 +1103,7 @@ class GridStrategy:
 
             order = self.connector.place_order_with_maker_retry(
                 symbol=symbol,
-                side='sell',  # 开空
+                side='sell',
                 amount=amount,
                 price=price,
                 order_type='limit',
@@ -1028,10 +1112,10 @@ class GridStrategy:
             )
 
             grid_state.upper_orders[price] = order.order_id
-            logger.info(f"{symbol} 成功挂上方网格 @ {price:.6f}, {amount}张")
+            logger.info(f"{symbol} upper grid order placed @ {price:.6f}, {amount} contracts")
 
         except Exception as e:
-            logger.warning(f"{symbol} 挂上方网格失败 @ {price:.6f}: {e}")
+            logger.warning(f"{symbol} upper grid order failed @ {price:.6f}: {e}")
 
     def _place_single_lower_grid_by_price(self, symbol: str, grid_state: GridState, price: float) -> None:
         """
@@ -1056,9 +1140,16 @@ class GridStrategy:
                 return
 
             # 仅基础止盈（基础仓位的1/total_levels）
-            base_margin = self.config.position.base_margin
-            total_levels = len(grid_state.grid_prices.get_lower_levels())
-            amount = self._calculate_amount(symbol, base_margin / total_levels, grid_state.entry_price)
+            existing_id = self._match_open_order_by_price(
+                self._get_open_orders_safe(symbol), "buy", price
+            )
+            if existing_id:
+                grid_state.lower_orders[price] = existing_id
+                logger.info(f"{symbol} lower grid already open @ {price:.6f}, skip")
+                return
+
+            grid_margin = self.config.position.grid_margin
+            amount = self._calculate_amount(symbol, grid_margin, grid_state.entry_price)
 
             # 验证总仓位不会超限
             is_safe, safe_amount, warning = self._validate_total_exposure_before_buy_order(
@@ -1667,6 +1758,10 @@ class GridStrategy:
             return False, 0.0, "无法查询空头仓位"
 
         current_short_size = short_position.size
+        base_margin = self.config.position.base_margin
+        min_ratio = self.config.position.min_base_position_ratio
+        expected_base = self._calculate_amount(symbol, base_margin, grid_state.entry_price)
+        min_base_amount = expected_base * min_ratio
 
         # 2. 计算所有pending下方买单的总数量
         pending_lower_total = 0.0
@@ -1694,18 +1789,27 @@ class GridStrategy:
             pending_lower_total = 0.0
 
         # 3. 计算可用容量
-        available_capacity = current_short_size - pending_lower_total
+        max_closeable = max(current_short_size - min_base_amount, 0.0)
+        available_capacity = max_closeable - pending_lower_total
 
         # 4. 计算安全数量
         safe_amount = min(new_order_amount, available_capacity)
+        if max_closeable <= 0:
+            warning = "min base reserved, no closeable capacity"
+            logger.warning(f"{symbol} {warning}")
+            return False, 0.0, warning
+        if available_capacity <= 0:
+            warning = "min base reserved, pending orders exceed closeable"
+            logger.warning(f"{symbol} {warning}")
+            return False, 0.0, warning
 
         # 5. 检查安全性
-        ratio = (pending_lower_total + safe_amount) / current_short_size if current_short_size > 0 else 0
+        ratio = (pending_lower_total + safe_amount) / max_closeable if max_closeable > 0 else 0
 
         if safe_amount < new_order_amount * 0.9:
             warning = (
-                f"下方网格容量不足: 可用={available_capacity:.2f}/{current_short_size:.2f}张, "
-                f"期望={new_order_amount:.2f}张, 安全={safe_amount:.2f}张 ({ratio*100:.1f}%)"
+                f"lower grid capacity insufficient: closeable={available_capacity:.2f}/{max_closeable:.2f} "
+                f"target={new_order_amount:.2f} safe={safe_amount:.2f} ({ratio*100:.1f}%)"
             )
             logger.warning(f"{symbol} {warning}")
             return False, safe_amount, warning

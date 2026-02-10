@@ -97,6 +97,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eth-residual-rate-limit", type=float, default=0.01)
     parser.add_argument("--binance-component-max-weight", type=float, default=0.8)
     parser.add_argument("--binance-component-weight-strict", action="store_true")
+    parser.add_argument("--air-mean-deviation-filter", action="store_true")
+    parser.set_defaults(air_mean_use_median=True)
+    parser.add_argument("--air-mean-use-median", dest="air_mean_use_median", action="store_true")
+    parser.add_argument("--air-mean-use-mean", dest="air_mean_use_median", action="store_false")
+    parser.add_argument("--air-mean-deviation-window", type=int, default=60)
+    parser.add_argument("--air-mean-deviation-cooldown-days", type=int, default=365)
+    parser.add_argument("--air-mean-deviation-rate-window-days", type=int, default=180)
+    parser.add_argument("--air-mean-deviation-ever", action="store_true")
+    parser.add_argument("--air-mean-corr-drop-threshold", type=float, default=0.2)
+    parser.add_argument("--air-mean-corr-drop-rate-limit", type=float, default=0.05)
+    parser.add_argument("--air-mean-residual-z", type=float, default=2.5)
+    parser.add_argument("--air-mean-residual-rate-limit", type=float, default=0.01)
     return parser.parse_args()
 
 
@@ -196,6 +208,24 @@ def calculate_daily_returns(df: pd.DataFrame) -> pd.Series:
     if "close" not in df.columns:
         return pd.Series(dtype=float)
     return df["close"].pct_change().dropna()
+
+
+def build_returns_frame(
+    histories: Dict[str, pd.DataFrame],
+    symbols: Iterable[str],
+) -> pd.DataFrame:
+    series_list = []
+    for symbol in symbols:
+        df = histories.get(symbol)
+        if df is None or df.empty:
+            continue
+        s = calculate_daily_returns(df)
+        s = s.rename(symbol)
+        series_list.append(s)
+    if not series_list:
+        return pd.DataFrame()
+    frame = pd.concat(series_list, axis=1).dropna(how="all")
+    return frame
 
 
 def residual_events(
@@ -346,6 +376,91 @@ def apply_eth_deviation_filter(
     return kept, diagnostics
 
 
+def apply_air_mean_deviation_filter(
+    histories: Dict[str, pd.DataFrame],
+    pool_symbols: Iterable[str],
+    candidate_symbols: Iterable[str],
+    *,
+    as_of: date,
+    window: int,
+    cooldown_days: int,
+    rate_window_days: int,
+    deviation_ever: bool,
+    corr_threshold: float,
+    corr_rate_limit: float,
+    residual_z: float,
+    residual_rate_limit: float,
+    use_median: bool,
+) -> Tuple[List[str], Dict[str, Dict[str, float]]]:
+    """
+    Use air-coin mean/median returns as baseline for deviation detection.
+    """
+    pool_returns = build_returns_frame(histories, pool_symbols)
+    if pool_returns.empty:
+        logger.warning("Air mean returns missing; skip air-mean deviation filter.")
+        return list(candidate_symbols), {}
+
+    diagnostics: Dict[str, Dict[str, float]] = {}
+    kept: List[str] = []
+
+    for symbol in candidate_symbols:
+        coin_returns = pool_returns.get(symbol)
+        if coin_returns is None or coin_returns.empty:
+            continue
+
+        pool_cols = [c for c in pool_returns.columns if c != symbol]
+        if not pool_cols:
+            continue
+
+        if use_median:
+            baseline = pool_returns[pool_cols].median(axis=1)
+        else:
+            baseline = pool_returns[pool_cols].mean(axis=1)
+
+        events_corr = corr_drop_events(
+            baseline,
+            coin_returns,
+            window=window,
+            corr_threshold=corr_threshold,
+        )
+        events_resid = residual_events(
+            baseline,
+            coin_returns,
+            window=window,
+            z_threshold=residual_z,
+        )
+
+        corr_recent = _has_event_in_last(events_corr, as_of=as_of, days=cooldown_days)
+        resid_recent = _has_event_in_last(events_resid, as_of=as_of, days=cooldown_days)
+        corr_rate = _event_rate_in_window(events_corr, as_of=as_of, window_days=rate_window_days)
+        resid_rate = _event_rate_in_window(events_resid, as_of=as_of, window_days=rate_window_days)
+        corr_any = bool(events_corr.any()) if not events_corr.empty else False
+        resid_any = bool(events_resid.any()) if not events_resid.empty else False
+
+        if deviation_ever:
+            kick_corr = corr_recent
+            kick_resid = resid_recent
+        else:
+            kick_corr = corr_recent or (not np.isnan(corr_rate) and corr_rate > corr_rate_limit)
+            kick_resid = resid_recent or (not np.isnan(resid_rate) and resid_rate > residual_rate_limit)
+
+        diagnostics[symbol] = {
+            "air_corr_recent": float(corr_recent),
+            "air_resid_recent": float(resid_recent),
+            "air_corr_rate": corr_rate,
+            "air_resid_rate": resid_rate,
+            "air_corr_any": float(corr_any),
+            "air_resid_any": float(resid_any),
+            "air_kick_corr": float(kick_corr),
+            "air_kick_resid": float(kick_resid),
+        }
+
+        if not (kick_corr or kick_resid):
+            kept.append(symbol)
+
+    return kept, diagnostics
+
+
 def fetch_funding_rate(
     fetcher: BinanceDataFetcher,
     symbol: str
@@ -370,14 +485,15 @@ def build_candidates(
     atr_spike_multiplier: float = ATR_SPIKE_MULTIPLIER,
     binance_component_max_weight: float = 0.8,
     binance_component_weight_strict: bool = True,
+    histories: Optional[Dict[str, pd.DataFrame]] = None,
 ) -> List[Candidate]:
 
-    end_dt = datetime.combine(as_of_date, datetime.max.time(), tzinfo=timezone.utc)
-    start_dt = end_dt - timedelta(days=200)
-
-    histories = fetcher.fetch_bulk_history(
-        symbols, start=start_dt, end=end_dt, timeframe=timeframe
-    )
+    if histories is None:
+        end_dt = datetime.combine(as_of_date, datetime.max.time(), tzinfo=timezone.utc)
+        start_dt = end_dt - timedelta(days=200)
+        histories = fetcher.fetch_bulk_history(
+            symbols, start=start_dt, end=end_dt, timeframe=timeframe
+        )
 
     # ⭐ 优化：批量异步获取所有币种的资金费率（避免速率限制）
     logger.info(f"批量获取 {len(symbols)} 个币种的资金费率...")
@@ -481,6 +597,16 @@ def run_scan(
     eth_residual_rate_limit: float = 0.01,
     binance_component_max_weight: float = 0.8,
     binance_component_weight_strict: bool = True,
+    air_mean_deviation_filter: bool = False,
+    air_mean_use_median: bool = True,
+    air_mean_deviation_window: int = 60,
+    air_mean_deviation_cooldown_days: int = 365,
+    air_mean_deviation_rate_window_days: int = 180,
+    air_mean_deviation_ever: bool = False,
+    air_mean_corr_drop_threshold: float = 0.2,
+    air_mean_corr_drop_rate_limit: float = 0.05,
+    air_mean_residual_z: float = 2.5,
+    air_mean_residual_rate_limit: float = 0.01,
     fetcher: Optional[BinanceDataFetcher] = None,
 ) -> pd.DataFrame:
 
@@ -496,6 +622,23 @@ def run_scan(
     if not air_pool:
         raise RuntimeError("空气币池为空")
 
+    history_lookback_days = 200
+    if air_mean_deviation_filter:
+        history_lookback_days = max(
+            history_lookback_days,
+            air_mean_deviation_window,
+            air_mean_deviation_rate_window_days,
+        ) + 5
+
+    end_dt = datetime.combine(as_of, datetime.max.time(), tzinfo=timezone.utc)
+    start_dt = end_dt - timedelta(days=history_lookback_days)
+    pool_histories = fetcher.fetch_bulk_history(
+        air_pool,
+        start=start_dt,
+        end=end_dt,
+        timeframe=timeframe,
+    )
+
     candidates = build_candidates(
         fetcher,
         air_pool,
@@ -507,6 +650,7 @@ def run_scan(
         atr_spike_multiplier=atr_spike_multiplier,
         binance_component_max_weight=binance_component_max_weight,
         binance_component_weight_strict=binance_component_weight_strict,
+        histories=pool_histories,
     )
 
     df = pd.DataFrame([c.__dict__ for c in candidates])
@@ -543,6 +687,33 @@ def run_scan(
             corr_rate_limit=eth_corr_drop_rate_limit,
             residual_z=eth_residual_z,
             residual_rate_limit=eth_residual_rate_limit,
+        )
+        df = df[df["symbol"].isin(set(kept))].copy()
+        if diagnostics:
+            diag_df = (
+                pd.DataFrame.from_dict(diagnostics, orient="index")
+                .reset_index()
+                .rename(columns={"index": "symbol"})
+            )
+            df = df.merge(diag_df, on="symbol", how="left")
+
+    if air_mean_deviation_filter:
+        logger.info("应用垃圾币均值偏离筛选...")
+        pool_symbols = list(air_pool)
+        kept, diagnostics = apply_air_mean_deviation_filter(
+            pool_histories,
+            pool_symbols,
+            df["symbol"].tolist(),
+            as_of=as_of,
+            window=air_mean_deviation_window,
+            cooldown_days=air_mean_deviation_cooldown_days,
+            rate_window_days=air_mean_deviation_rate_window_days,
+            deviation_ever=air_mean_deviation_ever,
+            corr_threshold=air_mean_corr_drop_threshold,
+            corr_rate_limit=air_mean_corr_drop_rate_limit,
+            residual_z=air_mean_residual_z,
+            residual_rate_limit=air_mean_residual_rate_limit,
+            use_median=air_mean_use_median,
         )
         df = df[df["symbol"].isin(set(kept))].copy()
         if diagnostics:
@@ -609,6 +780,16 @@ def main() -> None:
         eth_residual_rate_limit=args.eth_residual_rate_limit,
         binance_component_max_weight=args.binance_component_max_weight,
         binance_component_weight_strict=args.binance_component_weight_strict,
+        air_mean_deviation_filter=args.air_mean_deviation_filter,
+        air_mean_use_median=args.air_mean_use_median,
+        air_mean_deviation_window=args.air_mean_deviation_window,
+        air_mean_deviation_cooldown_days=args.air_mean_deviation_cooldown_days,
+        air_mean_deviation_rate_window_days=args.air_mean_deviation_rate_window_days,
+        air_mean_deviation_ever=args.air_mean_deviation_ever,
+        air_mean_corr_drop_threshold=args.air_mean_corr_drop_threshold,
+        air_mean_corr_drop_rate_limit=args.air_mean_corr_drop_rate_limit,
+        air_mean_residual_z=args.air_mean_residual_z,
+        air_mean_residual_rate_limit=args.air_mean_residual_rate_limit,
     )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)

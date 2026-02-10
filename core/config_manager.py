@@ -74,13 +74,23 @@ class ScreeningConfig:
     eth_deviation_window: int = 60      # 滚动窗口(天)
     eth_deviation_cooldown_days: int = 30  # 最近N天发生偏离直接剔除
     eth_deviation_rate_window_days: int = 180  # 统计偏离频率窗口
-    eth_deviation_ever: bool = False     # 只要历史窗口内发生过偏离就剔除
+    eth_deviation_ever: bool = False     # 豁免模式：只看最近N天是否偏离
     eth_corr_drop_threshold: float = 0.2       # corr_drop阈值
     eth_corr_drop_rate_limit: float = 0.05     # corr_drop频率上限
     eth_residual_z: float = 2.5                # 残差z阈值
     eth_residual_rate_limit: float = 0.01      # 残差偏离频率上限
     binance_component_max_weight: float = 0.8  # Binance成分占比上限(<=80%)
     binance_component_weight_strict: bool = True  # 无法获取占比时是否剔除
+    air_mean_deviation_filter: bool = False    # 是否启用垃圾币均值偏离筛选
+    air_mean_use_median: bool = True           # 使用中位数(更抗极端值)
+    air_mean_deviation_window: int = 60        # 滚动窗口(天)
+    air_mean_deviation_cooldown_days: int = 365  # 最近N天发生偏离直接剔除
+    air_mean_deviation_rate_window_days: int = 180  # 统计偏离频率窗口
+    air_mean_deviation_ever: bool = False      # 豁免模式：只看最近N天是否偏离
+    air_mean_corr_drop_threshold: float = 0.2  # corr_drop阈值
+    air_mean_corr_drop_rate_limit: float = 0.05  # corr_drop频率上限
+    air_mean_residual_z: float = 2.5           # 残差z阈值
+    air_mean_residual_rate_limit: float = 0.01 # 残差偏离频率上限
 
 
 @dataclass

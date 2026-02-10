@@ -345,6 +345,16 @@ class TradingBot:
                 eth_residual_rate_limit=self.config_mgr.screening.eth_residual_rate_limit,
                 binance_component_max_weight=self.config_mgr.screening.binance_component_max_weight,
                 binance_component_weight_strict=self.config_mgr.screening.binance_component_weight_strict,
+                air_mean_deviation_filter=self.config_mgr.screening.air_mean_deviation_filter,
+                air_mean_use_median=self.config_mgr.screening.air_mean_use_median,
+                air_mean_deviation_window=self.config_mgr.screening.air_mean_deviation_window,
+                air_mean_deviation_cooldown_days=self.config_mgr.screening.air_mean_deviation_cooldown_days,
+                air_mean_deviation_rate_window_days=self.config_mgr.screening.air_mean_deviation_rate_window_days,
+                air_mean_deviation_ever=self.config_mgr.screening.air_mean_deviation_ever,
+                air_mean_corr_drop_threshold=self.config_mgr.screening.air_mean_corr_drop_threshold,
+                air_mean_corr_drop_rate_limit=self.config_mgr.screening.air_mean_corr_drop_rate_limit,
+                air_mean_residual_z=self.config_mgr.screening.air_mean_residual_z,
+                air_mean_residual_rate_limit=self.config_mgr.screening.air_mean_residual_rate_limit,
                 fetcher=self.data_fetcher
             )
 
@@ -376,18 +386,22 @@ class TradingBot:
             self.current_candidates = valid_candidates[:10]  # 保存前10个候选
             logger.info(f"更新候选币列表: {self.current_candidates}")
 
-            # 1. 优先处理手动指定币种（仅处理未持仓的）
-            manual_symbols = self.config_mgr.position.manual_symbols
-            if manual_symbols:
-                # 🔧 FIX: 过滤掉已持仓的manual_symbols
-                existing_symbols = set(self.position_mgr.get_all_symbols())
-                new_manual_symbols = [s for s in manual_symbols if s not in existing_symbols]
+            # 1. 手动指定币种处理
+            # 若启用资金费率排序，则严格按排序顺序开仓，不强制插队
+            if not self.config_mgr.screening.funding_rate_sort:
+                manual_symbols = self.config_mgr.position.manual_symbols
+                if manual_symbols:
+                    # 🔧 FIX: 过滤掉已持仓的manual_symbols
+                    existing_symbols = set(self.position_mgr.get_all_symbols())
+                    new_manual_symbols = [s for s in manual_symbols if s not in existing_symbols]
 
-                if new_manual_symbols:
-                    logger.info(f"检测到未持仓的手动指定币种: {new_manual_symbols}")
-                    self.evaluate_new_entries(new_manual_symbols)
-                else:
-                    logger.info(f"手动指定币种 {manual_symbols} 已全部持仓")
+                    if new_manual_symbols:
+                        logger.info(f"检测到未持仓的手动指定币种: {new_manual_symbols}")
+                        self.evaluate_new_entries(new_manual_symbols)
+                    else:
+                        logger.info(f"手动指定币种 {manual_symbols} 已全部持仓")
+            else:
+                logger.info("已启用资金费率排序，严格按排序顺序开仓（手动币不插队）")
 
             # 2. 处理筛选出的候选币种
             self.evaluate_new_entries(valid_candidates[:5])

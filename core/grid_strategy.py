@@ -140,6 +140,9 @@ class GridStrategy:
 
         # 🔧 NEW: 不健康币种标记（IMBALANCE检测到的）
         self._unhealthy_symbols: set = set()
+        # Lower-grid/base-TP capacity logs can be noisy; throttle per symbol.
+        self._capacity_log_last: Dict[tuple, float] = {}
+        self._capacity_log_interval = 60  # seconds
 
         logger.info("网格策略执行器初始化完成")
 
@@ -151,6 +154,25 @@ class GridStrategy:
             不健康币种的集合
         """
         return self._unhealthy_symbols.copy()
+
+    def _log_capacity_event(
+        self,
+        symbol: str,
+        key: str,
+        message: str,
+        level: str = "warning",
+        interval: Optional[int] = None
+    ) -> None:
+        """Throttle repetitive capacity-related logs per symbol."""
+        now = time.time()
+        interval = self._capacity_log_interval if interval is None else interval
+        cache_key = (symbol, key)
+        last_ts = self._capacity_log_last.get(cache_key)
+        if last_ts is not None and (now - last_ts) < interval:
+            return
+        self._capacity_log_last[cache_key] = now
+        log_fn = getattr(logger, level, logger.warning)
+        log_fn(message)
 
     def calculate_grid_prices(self, entry_price: float) -> GridPrices:
         """
@@ -577,6 +599,7 @@ class GridStrategy:
             logger.info(f"{symbol} base TP levels = 0")
             return
 
+        blocked_due_to_capacity = False
         for i, level in enumerate(sorted(lower_levels, reverse=True)):
             if i >= allowed_levels:
                 break
@@ -600,7 +623,13 @@ class GridStrategy:
                     symbol, grid_state, base_amount_per_level
                 )
                 if not is_safe:
-                    logger.warning(f"{symbol} base TP blocked: {warning}")
+                    blocked_due_to_capacity = True
+                    self._log_capacity_event(
+                        symbol,
+                        "base_tp_blocked",
+                        f"{symbol} base TP blocked: {warning}",
+                        level="warning"
+                    )
                     break
 
                 order = self._place_position_aware_buy_order(symbol, price, base_amount_per_level)
@@ -613,9 +642,25 @@ class GridStrategy:
         success_count = len(grid_state.lower_orders)
         logger.info(f"TP orders placed: {success_count}/{allowed_levels}")
         if success_count < allowed_levels:
-            logger.error(f"TP orders incomplete: expected {allowed_levels}, actual {success_count}")
+            if blocked_due_to_capacity:
+                self._log_capacity_event(
+                    symbol,
+                    "base_tp_incomplete",
+                    f"{symbol} TP orders incomplete due to capacity: expected {allowed_levels}, actual {success_count}",
+                    level="warning"
+                )
+            else:
+                logger.error(f"TP orders incomplete: expected {allowed_levels}, actual {success_count}")
         elif success_count == 0:
-            logger.error("No TP orders were placed successfully")
+            if blocked_due_to_capacity:
+                self._log_capacity_event(
+                    symbol,
+                    "base_tp_zero",
+                    f"{symbol} TP orders skipped due to capacity",
+                    level="warning"
+                )
+            else:
+                logger.error("No TP orders were placed successfully")
 
     def _place_lower_grid_order(self, symbol: str, grid_state: GridState, level: int) -> None:
         """挂下方网格订单(平空) - 仅用于重新挂上方成交前的基础止盈单"""
@@ -1176,7 +1221,12 @@ class GridStrategy:
             )
 
             if not is_safe:
-                logger.error(f"{symbol} ⚠️ 拒绝挂下方网格 @ {price:.6f}: {warning}")
+                self._log_capacity_event(
+                    symbol,
+                    "lower_grid_blocked",
+                    f"{symbol} ⚠️ 拒绝挂下方网格 @ {price:.6f}: {warning}",
+                    level="warning"
+                )
                 return
 
             if safe_amount < amount:

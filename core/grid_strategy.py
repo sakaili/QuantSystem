@@ -452,6 +452,7 @@ class GridStrategy:
 
     def _match_open_order_by_price(
         self,
+        symbol: str,
         open_orders: List[Order],
         side: str,
         target_price: float,
@@ -484,7 +485,7 @@ class GridStrategy:
                     )
                     continue
 
-                existing_id = self._match_open_order_by_price(open_orders, "sell", price)
+                existing_id = self._match_open_order_by_price(symbol, open_orders, "sell", price)
                 if existing_id:
                     grid_state.upper_orders[price] = existing_id
                     logger.info(f"{symbol} upper grid already open @ {price:.6f}, skip")
@@ -526,7 +527,7 @@ class GridStrategy:
                     )
                     continue
 
-                existing_id = self._match_open_order_by_price(open_orders, "buy", price)
+                existing_id = self._match_open_order_by_price(symbol, open_orders, "buy", price)
                 if existing_id:
                     grid_state.lower_orders[price] = existing_id
                     logger.info(f"{symbol} lower grid already open @ {price:.6f}, skip")
@@ -589,7 +590,7 @@ class GridStrategy:
                     logger.error(f"{symbol} price collision: upper grid exists @ {price:.6f}, skip base TP")
                     continue
 
-                existing_id = self._match_open_order_by_price(open_orders, "buy", price)
+                existing_id = self._match_open_order_by_price(symbol, open_orders, "buy", price)
                 if existing_id:
                     grid_state.lower_orders[price] = existing_id
                     logger.info(f"{symbol} base TP already open @ {price:.6f}, skip")
@@ -1109,7 +1110,7 @@ class GridStrategy:
                 return
 
             existing_id = self._match_open_order_by_price(
-                self._get_open_orders_safe(symbol), "sell", price
+                symbol, self._get_open_orders_safe(symbol), "sell", price
             )
             if existing_id:
                 grid_state.upper_orders[price] = existing_id
@@ -1159,7 +1160,7 @@ class GridStrategy:
 
             # 仅基础止盈（基础仓位的1/total_levels）
             existing_id = self._match_open_order_by_price(
-                self._get_open_orders_safe(symbol), "buy", price
+                symbol, self._get_open_orders_safe(symbol), "buy", price
             )
             if existing_id:
                 grid_state.lower_orders[price] = existing_id

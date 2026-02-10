@@ -42,7 +42,7 @@ position:
 # 币种筛选 - Screening Criteria
 screening:
   bottom_n: 50                  # 流动性排名倒数N
-  min_listing_days: 365         # 最小上市天数
+  min_listing_days: 300         # 最小上市天数
   funding_rate_floor: 0.0       # 资金费率下限(>0,多头付费给空头)
   atr_spike_multiplier: 3.0     # ATR暴涨倍数阈值
   funding_rate_sort: true       # 是否按历史累计资金费率排序

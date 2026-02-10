@@ -139,22 +139,11 @@ class GridStrategy:
         self._last_reconciliation: Dict[str, datetime] = {}
         self._reconciliation_interval = 60  # 对账间隔 (秒)
 
-        # 🔧 NEW: 不健康币种标记（IMBALANCE检测到的）
-        self._unhealthy_symbols: set = set()
         # Lower-grid/base-TP capacity logs can be noisy; throttle per symbol.
         self._capacity_log_last: Dict[tuple, float] = {}
         self._capacity_log_interval = 60  # seconds
 
         logger.info("网格策略执行器初始化完成")
-
-    def get_unhealthy_symbols(self) -> set:
-        """
-        获取不健康的币种列表（IMBALANCE检测到的）
-
-        Returns:
-            不健康币种的集合
-        """
-        return self._unhealthy_symbols.copy()
 
     def _log_capacity_event(
         self,
@@ -856,12 +845,6 @@ class GridStrategy:
             symbol: 交易对
             grid_state: 网格状态
         """
-        # 🔧 NEW: 跳过不健康的币种（避免反复撤销/挂单循环）
-        if symbol in self._unhealthy_symbols:
-            logger.debug(f"{symbol} 已标记为不健康，跳过下方网格修复")
-            # 但仍然修复上方网格
-            return
-
         if not self._should_check_grid_repair(grid_state):
             return
 
@@ -1478,8 +1461,6 @@ class GridStrategy:
 
             if not short_position:
                 logger.error(f"{symbol} 基础仓位已完全平仓！触发紧急清理")
-                # 标记为不健康，停止网格修复
-                self._unhealthy_symbols.add(symbol)
                 # 取消所有订单
                 try:
                     self.connector.cancel_all_orders(symbol)
@@ -2059,7 +2040,7 @@ class GridStrategy:
         每60秒运行一次，检查：
         1. 当前空头仓位大小
         2. 所有pending lower order总额
-        3. 如果lower总额 > 空头仓位 * 0.95: 触发警报并撤销最远的lower订单
+        3. 如果lower总额 > 空头仓位 * 0.95: 记录警报（不强制撤单）
 
         Args:
             symbol: 交易对
@@ -2105,38 +2086,20 @@ class GridStrategy:
         # 3. 计算平衡比例
         ratio = total_lower_amount / short_size if short_size > 0 else 0
 
-        # 4. 检查平衡状态
+        # 4. 记录平衡状态（仅记录，不做撤单或标记）
         if ratio > 0.95:
-            # 危险：下方买单即将超过空头仓位
-            logger.error(
-                f"{symbol} ⚠️ IMBALANCE DETECTED! "
-                f"下方买单={total_lower_amount:.2f}张 ({lower_order_count}个订单), "
+            logger.warning(
+                f"{symbol} 下方买单过高: "
+                f"{total_lower_amount:.2f}张 ({lower_order_count}个订单), "
                 f"空头仓位={short_size:.2f}张, "
                 f"比例={ratio*100:.1f}%"
             )
-
-            # 🔧 NEW: 标记为不健康币种，停止修复下方网格
-            self._unhealthy_symbols.add(symbol)
-            logger.warning(f"{symbol} 已标记为不健康币种，停止修复下方网格")
-
-            # 应急处理：撤销最远的下方网格
-            if grid_state.lower_orders:
-                furthest_lower_price = min(grid_state.lower_orders.keys())
-                logger.warning(
-                    f"{symbol} 应急措施：撤销最远下方网格 @ {furthest_lower_price:.6f} "
-                    "以防止超限"
-                )
-                self._remove_grid_by_price(symbol, grid_state, furthest_lower_price, is_upper=False)
-
         elif ratio > 0.85:
-            # 警告：下方买单接近上限
             logger.warning(
                 f"{symbol} 下方买单接近上限: "
                 f"{total_lower_amount:.2f}/{short_size:.2f}张 ({ratio*100:.1f}%)"
             )
-
         else:
-            # 健康状态
             logger.info(
                 f"{symbol} 仓位平衡健康: "
                 f"下方买单={total_lower_amount:.2f}张 ({lower_order_count}个), "

@@ -586,17 +586,11 @@ class TradingBot:
         current_count = self.position_mgr.get_position_count()
         max_count = self.config_mgr.position.max_symbols
 
-        # 检查不健康的持仓（两种来源）
-        # 1. PositionManager检测的（空头头寸不足40%）
+        # 检查不健康的持仓（PositionManager检测的空头头寸不足40%）
         unhealthy_from_position = self.position_mgr.get_unhealthy_positions(
             min_ratio=self.config_mgr.position.min_base_position_ratio
         )
-
-        # 2. GridStrategy检测的（IMBALANCE）
-        unhealthy_from_grid = self.grid_strategy.get_unhealthy_symbols()
-
-        # 合并两个来源
-        unhealthy_positions = list(set(unhealthy_from_position) | unhealthy_from_grid)
+        unhealthy_positions = list(set(unhealthy_from_position))
 
         if unhealthy_positions:
             logger.info(
@@ -644,10 +638,6 @@ class TradingBot:
                 if symbol in self.profit_monitor.get_monitored_symbols():
                     self.profit_monitor.remove_symbol(symbol)
                     logger.info(f"{symbol} 已从盈利监控中移除")
-
-                # 从不健康币种集合中移除
-                if symbol in self.grid_strategy._unhealthy_symbols:
-                    self.grid_strategy._unhealthy_symbols.remove(symbol)
 
                 logger.info(f"{symbol} 孤儿grid_state清理完成")
 

@@ -552,17 +552,26 @@ class GridStrategy:
                 logger.warning(f"挂单失败 Grid-{level}: {e}")
 
     def _place_base_position_take_profit(self, symbol: str, grid_state: GridState) -> None:
-        """Place layered take-profit orders for the base position (no min-ratio limit)."""
+        """Place layered take-profit orders for the base position (keep min base ratio)."""
+        base_margin = self.config.position.base_margin
         grid_margin = self.config.position.grid_margin
         open_orders = self._get_open_orders_safe(symbol)
+        min_ratio = self.config.position.min_base_position_ratio
+
+        closeable_ratio = 1.0 - min_ratio
+        closeable_margin = base_margin * closeable_ratio
 
         lower_levels = grid_state.grid_prices.get_lower_levels()
         total_levels = len(lower_levels)
-        allowed_levels = total_levels
+
+        allowed_levels_by_ratio = int(total_levels * closeable_ratio)
+        allowed_levels_by_margin = int(closeable_margin // grid_margin) if grid_margin > 0 else 0
+        allowed_levels = min(allowed_levels_by_ratio, allowed_levels_by_margin)
 
         base_amount_per_level = self._calculate_amount(symbol, grid_margin, grid_state.entry_price)
 
         logger.info(f"Base TP orders: {allowed_levels}/{total_levels} levels, {base_amount_per_level:.1f} each")
+        logger.info(f"Keep min base: {min_ratio*100:.0f}%")
         if allowed_levels <= 0:
             logger.info(f"{symbol} base TP levels = 0")
             return
@@ -571,9 +580,7 @@ class GridStrategy:
             if i >= allowed_levels:
                 break
             try:
-                price = self._quantize_price(
-                    symbol, grid_state.grid_prices.grid_levels[level], side='sell'
-                )
+                price = self._quantize_price(symbol, grid_state.grid_prices.grid_levels[level], side='buy')
                 logger.debug(f"Base TP @ {price:.6f}: {base_amount_per_level:.1f}")
 
                 if price in grid_state.lower_orders:
@@ -588,6 +595,13 @@ class GridStrategy:
                     logger.info(f"{symbol} base TP already open @ {price:.6f}, skip")
                     continue
 
+                is_safe, safe_amount, warning = self._validate_total_exposure_before_buy_order(
+                    symbol, grid_state, base_amount_per_level
+                )
+                if not is_safe:
+                    logger.warning(f"{symbol} base TP blocked: {warning}")
+                    break
+
                 order = self._place_position_aware_buy_order(symbol, price, base_amount_per_level)
                 if order:
                     grid_state.lower_orders[price] = order.order_id
@@ -601,6 +615,7 @@ class GridStrategy:
             logger.error(f"TP orders incomplete: expected {allowed_levels}, actual {success_count}")
         elif success_count == 0:
             logger.error("No TP orders were placed successfully")
+
     def _place_lower_grid_order(self, symbol: str, grid_state: GridState, level: int) -> None:
         """挂下方网格订单(平空) - 仅用于重新挂上方成交前的基础止盈单"""
         if level not in grid_state.grid_prices.grid_levels:
@@ -1615,9 +1630,10 @@ class GridStrategy:
                 # 补充缺失的订单
                 missing_upper = len(grid_state.grid_prices.get_upper_levels()) - len(grid_state.upper_orders)
 
-                # allow all lower levels for recovery
+                min_ratio = self.config.position.min_base_position_ratio
+                closeable_ratio = 1.0 - min_ratio
                 total_lower_levels = len(grid_state.grid_prices.get_lower_levels())
-                allowed_lower_levels = total_lower_levels
+                allowed_lower_levels = int(total_lower_levels * closeable_ratio)
                 missing_lower = allowed_lower_levels - len(grid_state.lower_orders)
 
                 if missing_upper > 0:
@@ -1792,21 +1808,51 @@ class GridStrategy:
         grid_state: GridState,
         new_order_amount: float
     ) -> tuple:
-        """
-        验证新买单不会导致总买单超过空头仓位
+        """Validate that new buy orders won't reduce below min base ratio."""
+        short_position = self._get_cached_short_position(symbol)
+        if not short_position:
+            return False, 0.0, "no short position"
 
-        Args:
-            symbol: 交易对
-            grid_state: 网格状态
-            new_order_amount: 新订单数量
+        current_short_size = short_position.size
+        base_margin = self.config.position.base_margin
+        min_ratio = self.config.position.min_base_position_ratio
+        expected_base = self._calculate_amount(symbol, base_margin, grid_state.entry_price)
+        min_base_amount = expected_base * min_ratio
 
-        Returns:
-            tuple[bool, float, str]: (是否安全, 安全数量, 警告信息)
-        """
-        # Validation disabled: allow lower orders to be placed freely.
-        return True, new_order_amount, ""
+        pending_lower_total = 0.0
+        try:
+            open_orders = self.connector.query_open_orders(symbol)
+            open_order_map = {order.order_id: order for order in open_orders}
+            for price, order_id in grid_state.lower_orders.items():
+                order = open_order_map.get(order_id)
+                if order and order.side == 'buy':
+                    pending_lower_total += order.amount
+        except Exception:
+            pending_lower_total = 0.0
 
+        max_closeable = max(current_short_size - min_base_amount, 0.0)
+        available_capacity = max_closeable - pending_lower_total
 
+        safe_amount = min(new_order_amount, available_capacity)
+        if max_closeable <= 0:
+            warning = "min base reserved, no closeable capacity"
+            return False, 0.0, warning
+        if available_capacity <= 0:
+            warning = "min base reserved, pending orders exceed closeable"
+            return False, 0.0, warning
+
+        ratio = (pending_lower_total + safe_amount) / max_closeable if max_closeable > 0 else 0
+        if safe_amount < new_order_amount * 0.9:
+            warning = (
+                f"lower grid capacity insufficient: closeable={available_capacity:.2f}/{max_closeable:.2f} "
+                f"target={new_order_amount:.2f} safe={safe_amount:.2f} ({ratio*100:.1f}%)"
+            )
+            return False, safe_amount, warning
+        elif ratio > 0.90:
+            warning = f"lower grid near saturation: {ratio*100:.1f}%"
+            return True, safe_amount, warning
+        else:
+            return True, safe_amount, ""
     def _reconcile_position_with_grids(self, symbol: str, grid_state: GridState) -> None:
         """
         定期对账：验证持仓与网格状态一致
@@ -1981,28 +2027,26 @@ class GridStrategy:
         desired_amount: float,
         max_retries: int = 5
     ) -> Optional[Order]:
-        """
-        Place a buy order without position validation.
-
-        Args:
-            symbol: trading symbol
-            price: limit price
-            desired_amount: order size
-            max_retries: max retries for maker placement
-
-        Returns:
-            Order object or None on failure
-            订单对象，如果无法安全下单则返回 None
-        """
+        """Place buy order (reduce-only) with basic short position check."""
         if desired_amount <= 0:
             logger.warning(f"{symbol} invalid desired_amount={desired_amount}, skip buy order")
+            return None
+
+        short_position = self._get_cached_short_position(symbol)
+        if not short_position:
+            logger.critical(f"{symbol} no short position, skip buy order")
+            return None
+
+        short_amount = short_position.size
+        safe_amount = min(desired_amount, short_amount)
+        if safe_amount <= 0:
             return None
 
         try:
             order = self.connector.place_order_with_maker_retry(
                 symbol=symbol,
                 side='buy',
-                amount=desired_amount,
+                amount=safe_amount,
                 price=price,
                 order_type='limit',
                 post_only=True,
@@ -2013,7 +2057,6 @@ class GridStrategy:
         except Exception as e:
             logger.error(f"{symbol} buy order failed: {e}")
             return None
-
     def _find_matched_upper_fill(
         self,
         grid_state: GridState,

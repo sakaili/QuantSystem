@@ -1029,9 +1029,10 @@ class GridStrategy:
 
     def _try_extend_grid(self, symbol: str, grid_state: GridState, filled_price: float, is_upper: bool) -> None:
         """
-        滚动窗口网格扩展（修复版 - 保持平衡）
+        滚动窗口网格扩展（保持平衡）
 
-        当边界网格成交时，在同侧添加新网格，在对侧移除最远网格，保持上下平衡
+        上方成交：在上方添加新网格，并添加对应止盈单
+        下方成交：始终滚动窗口（重开空、移除最远上方、补下方保护）
 
         Args:
             symbol: 交易对
@@ -1102,36 +1103,29 @@ class GridStrategy:
             # NET: +1 short capacity, +1 take-profit capacity (EXPANSION)
 
         else:  # 下方网格成交（价格下跌）
-            min_lower_price = min(lower_prices) if lower_prices else float('inf')
+            # 方案A：任何下方成交都滚动窗口
+            # 1) 重新开空以保持空头敞口
+            reopen_price = self._quantize_price(
+                symbol, current_price * (1 + spacing), side='sell'
+            )
+            self._place_single_upper_grid_by_price(symbol, grid_state, reopen_price)
+            logger.info(
+                f"{symbol} 滚动窗口：重新开空 @ {reopen_price:.6f} "
+                f"(成交价={filled_price:.6f})"
+            )
 
-            # 检查是否为边界网格（价格差异小于0.1%）
-            if abs(filled_price - min_lower_price) / min_lower_price < 0.001:
-                # 🔧 NEW STRATEGY: 重新开空以保持空头敞口
-                # 1. 在当前价格上方重新开空（profit taking + re-entry）
-                # 🔧 FIX 3: 使用当前价格计算重新开空价格，避免与恢复网格冲突
-                reopen_price = self._quantize_price(
-                    symbol, current_price * (1 + spacing), side='sell'
-                )
+            # 2) 移除最远的上方网格（保持窗口大小）
+            if upper_prices:
+                max_upper_price = max(upper_prices)
+                self._remove_grid_by_price(symbol, grid_state, max_upper_price, is_upper=True)
+                logger.info(f"{symbol} 滚动窗口：移除最远上方网格 @ {max_upper_price:.6f}")
 
-                # 🔧 FIX: 使用统一的网格放置函数，包含跨边验证
-                self._place_single_upper_grid_by_price(symbol, grid_state, reopen_price)
-                logger.info(
-                    f"{symbol} 滚动窗口：重新开空 @ {reopen_price:.6f} "
-                    f"(成交价={filled_price:.6f})"
-                )
-
-                # 2. 移除最远的上方网格（保持窗口大小）
-                if upper_prices:
-                    max_upper_price = max(upper_prices)
-                    self._remove_grid_by_price(symbol, grid_state, max_upper_price, is_upper=True)
-                    logger.info(f"{symbol} 滚动窗口：移除最远上方网格 @ {max_upper_price:.6f}")
-
-                # 3. 在下方添加新网格（更低价格 - 保持下方保护）
-                new_lower_price = self._quantize_price(
-                    symbol, current_price * (1 - spacing), side='buy'
-                )
-                self._place_single_lower_grid_by_price(symbol, grid_state, new_lower_price)
-                logger.info(f"{symbol} 滚动窗口：添加下方保护 @ {new_lower_price:.6f}")
+            # 3) 在下方添加新网格（更低价格 - 保持下方保护）
+            new_lower_price = self._quantize_price(
+                symbol, current_price * (1 - spacing), side='buy'
+            )
+            self._place_single_lower_grid_by_price(symbol, grid_state, new_lower_price)
+            logger.info(f"{symbol} 滚动窗口：添加下方保护 @ {new_lower_price:.6f}")
 
                 # NET: +1 short (reopen), -1 short (remove), +1 lower → MAINTAINS SHORT EXPOSURE ✅
 

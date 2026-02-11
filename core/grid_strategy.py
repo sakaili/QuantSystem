@@ -492,6 +492,27 @@ class GridStrategy:
                 return order.order_id
         return None
 
+    def _get_open_order_by_client_id(
+        self,
+        open_orders: List[Order],
+        client_order_id: str
+    ) -> Optional[Order]:
+        """Get the open order by client_order_id."""
+        if not client_order_id:
+            return None
+        for order in open_orders:
+            if order.client_order_id == client_order_id:
+                return order
+        return None
+
+    def _query_order_safe(self, symbol: str, order_id: str) -> Optional[Order]:
+        """Query a single order status safely."""
+        try:
+            return self.connector.query_order(order_id, symbol)
+        except Exception as e:
+            logger.warning(f"{symbol} query order failed {order_id}: {e}")
+            return None
+
     def _sanitize_symbol_for_id(self, symbol: str) -> str:
         """Sanitize symbol for client_order_id usage."""
         return re.sub(r'[^A-Za-z0-9]', '', symbol)
@@ -545,27 +566,29 @@ class GridStrategy:
 
         for level in grid_state.grid_prices.get_upper_levels():
             try:
-                price = self._quantize_price(
+                base_price = self._quantize_price(
                     symbol, grid_state.grid_prices.grid_levels[level], side='sell'
                 )
-                if price in grid_state.upper_orders:
-                    continue
-                if price in grid_state.lower_orders:
-                    logger.error(
-                        f"{symbol} price collision: lower grid already exists @ {price:.6f}, skip upper"
-                    )
-                    continue
 
                 client_order_id = self._make_client_order_id(
-                    symbol, "sell", level=level, price=price, entry_price=grid_state.entry_price
+                    symbol, "sell", level=level, price=base_price, entry_price=grid_state.entry_price
                 )
                 existing_id = self._match_open_order_by_client_id(open_orders, client_order_id)
-                if not existing_id:
-                    existing_id = self._match_open_order_by_price(symbol, open_orders, "sell", price)
                 if existing_id:
-                    grid_state.upper_orders[price] = existing_id
-                    logger.info(f"{symbol} upper grid already open @ {price:.6f}, skip")
+                    existing_order = self._get_open_order_by_client_id(open_orders, client_order_id)
+                    if existing_order and existing_order.price is not None:
+                        existing_price = self._quantize_price(symbol, existing_order.price, side=existing_order.side)
+                    else:
+                        existing_price = base_price
+                    grid_state.upper_orders[existing_price] = existing_id
+                    logger.info(f"{symbol} upper grid already open @ {existing_price:.6f}, skip")
                     continue
+
+                price = self._resolve_price_collision(
+                    symbol, base_price, "sell", grid_state, open_orders=open_orders
+                )
+                if price != base_price:
+                    grid_state.grid_prices.add_level(level, price)
 
                 amount = self._calculate_amount(symbol, grid_margin, price)
 
@@ -593,27 +616,29 @@ class GridStrategy:
 
         for level in grid_state.grid_prices.get_lower_levels():
             try:
-                price = self._quantize_price(
+                base_price = self._quantize_price(
                     symbol, grid_state.grid_prices.grid_levels[level], side='buy'
                 )
-                if price in grid_state.lower_orders:
-                    continue
-                if price in grid_state.upper_orders:
-                    logger.error(
-                        f"{symbol} price collision: upper grid already exists @ {price:.6f}, skip lower"
-                    )
-                    continue
 
                 client_order_id = self._make_client_order_id(
-                    symbol, "buy", level=level, price=price, entry_price=grid_state.entry_price
+                    symbol, "buy", level=level, price=base_price, entry_price=grid_state.entry_price
                 )
                 existing_id = self._match_open_order_by_client_id(open_orders, client_order_id)
-                if not existing_id:
-                    existing_id = self._match_open_order_by_price(symbol, open_orders, "buy", price)
                 if existing_id:
-                    grid_state.lower_orders[price] = existing_id
-                    logger.info(f"{symbol} lower grid already open @ {price:.6f}, skip")
+                    existing_order = self._get_open_order_by_client_id(open_orders, client_order_id)
+                    if existing_order and existing_order.price is not None:
+                        existing_price = self._quantize_price(symbol, existing_order.price, side=existing_order.side)
+                    else:
+                        existing_price = base_price
+                    grid_state.lower_orders[existing_price] = existing_id
+                    logger.info(f"{symbol} lower grid already open @ {existing_price:.6f}, skip")
                     continue
+
+                price = self._resolve_price_collision(
+                    symbol, base_price, "buy", grid_state, open_orders=open_orders
+                )
+                if price != base_price:
+                    grid_state.grid_prices.add_level(level, price)
 
                 amount = self._calculate_amount(symbol, grid_margin, price)
 
@@ -665,25 +690,28 @@ class GridStrategy:
             if i >= allowed_levels:
                 break
             try:
-                price = self._quantize_price(symbol, grid_state.grid_prices.grid_levels[level], side='buy')
-                logger.debug(f"Base TP @ {price:.6f}: {base_amount_per_level:.1f}")
-
-                if price in grid_state.lower_orders:
-                    continue
-                if price in grid_state.upper_orders:
-                    logger.error(f"{symbol} price collision: upper grid exists @ {price:.6f}, skip base TP")
-                    continue
+                base_price = self._quantize_price(symbol, grid_state.grid_prices.grid_levels[level], side='buy')
+                logger.debug(f"Base TP @ {base_price:.6f}: {base_amount_per_level:.1f}")
 
                 client_order_id = self._make_client_order_id(
-                    symbol, "buy", level=level, price=price, entry_price=grid_state.entry_price
+                    symbol, "buy", level=level, price=base_price, entry_price=grid_state.entry_price
                 )
                 existing_id = self._match_open_order_by_client_id(open_orders, client_order_id)
-                if not existing_id:
-                    existing_id = self._match_open_order_by_price(symbol, open_orders, "buy", price)
                 if existing_id:
-                    grid_state.lower_orders[price] = existing_id
-                    logger.info(f"{symbol} base TP already open @ {price:.6f}, skip")
+                    existing_order = self._get_open_order_by_client_id(open_orders, client_order_id)
+                    if existing_order and existing_order.price is not None:
+                        existing_price = self._quantize_price(symbol, existing_order.price, side=existing_order.side)
+                    else:
+                        existing_price = base_price
+                    grid_state.lower_orders[existing_price] = existing_id
+                    logger.info(f"{symbol} base TP already open @ {existing_price:.6f}, skip")
                     continue
+
+                price = self._resolve_price_collision(
+                    symbol, base_price, "buy", grid_state, open_orders=open_orders
+                )
+                if price != base_price:
+                    grid_state.grid_prices.add_level(level, price)
 
                 is_safe, safe_amount, warning = self._validate_total_exposure_before_buy_order(
                     symbol, grid_state, base_amount_per_level
@@ -735,9 +763,14 @@ class GridStrategy:
         if level not in grid_state.grid_prices.grid_levels:
             return
 
-        price = self._quantize_price(
+        base_price = self._quantize_price(
             symbol, grid_state.grid_prices.grid_levels[level], side='buy'
         )
+        price = self._resolve_price_collision(
+            symbol, base_price, "buy", grid_state
+        )
+        if price != base_price:
+            grid_state.grid_prices.add_level(level, price)
         grid_margin = self.config.position.grid_margin
         base_amount_per_level = self._calculate_amount(symbol, grid_margin, grid_state.entry_price)
 
@@ -768,9 +801,14 @@ class GridStrategy:
         if level not in grid_state.grid_prices.grid_levels:
             return
 
-        price = self._quantize_price(
+        base_price = self._quantize_price(
             symbol, grid_state.grid_prices.grid_levels[level], side='buy'
         )
+        price = self._resolve_price_collision(
+            symbol, base_price, "buy", grid_state
+        )
+        if price != base_price:
+            grid_state.grid_prices.add_level(level, price)
 
         # 🔧 FIX: 使用与开空单相同的数量（仅grid_margin）
         grid_margin = self.config.position.grid_margin
@@ -1222,34 +1260,31 @@ class GridStrategy:
         Place a single upper grid order by price.
         """
         try:
-            price = self._quantize_price(symbol, price, side='sell')
-            level = self._calculate_grid_level(price, grid_state.entry_price, self.config.grid.spacing)
+            base_price = self._quantize_price(symbol, price, side='sell')
+            level = self._calculate_grid_level(base_price, grid_state.entry_price, self.config.grid.spacing)
             if level not in grid_state.grid_prices.grid_levels:
-                grid_state.grid_prices.add_level(level, price)
-
-            if price in grid_state.upper_orders:
-                logger.warning(f"{symbol} upper grid already exists @ {price:.6f}, skip")
-                return
-
-            if price in grid_state.lower_orders:
-                logger.error(
-                    f"{symbol} price collision: lower grid already exists @ {price:.6f}, skip upper"
-                )
-                return
+                grid_state.grid_prices.add_level(level, base_price)
 
             client_order_id = self._make_client_order_id(
-                symbol, "sell", level=level, price=price, entry_price=grid_state.entry_price
+                symbol, "sell", level=level, price=base_price, entry_price=grid_state.entry_price
             )
             open_orders = self._get_open_orders_safe(symbol)
             existing_id = self._match_open_order_by_client_id(open_orders, client_order_id)
-            if not existing_id:
-                existing_id = self._match_open_order_by_price(
-                    symbol, open_orders, "sell", price
-                )
             if existing_id:
-                grid_state.upper_orders[price] = existing_id
-                logger.info(f"{symbol} upper grid already open @ {price:.6f}, skip")
+                existing_order = self._get_open_order_by_client_id(open_orders, client_order_id)
+                if existing_order and existing_order.price is not None:
+                    existing_price = self._quantize_price(symbol, existing_order.price, side=existing_order.side)
+                else:
+                    existing_price = base_price
+                grid_state.upper_orders[existing_price] = existing_id
+                logger.info(f"{symbol} upper grid already open @ {existing_price:.6f}, skip")
                 return
+
+            price = self._resolve_price_collision(
+                symbol, base_price, "sell", grid_state, open_orders=open_orders
+            )
+            if price != base_price:
+                grid_state.grid_prices.add_level(level, price)
 
             grid_margin = self.config.position.grid_margin
             amount = self._calculate_amount(symbol, grid_margin, price)
@@ -1281,35 +1316,32 @@ class GridStrategy:
             price: 价格
         """
         try:
-            price = self._quantize_price(symbol, price, side='buy')  # tick size
-            level = self._calculate_grid_level(price, grid_state.entry_price, self.config.grid.spacing)
+            base_price = self._quantize_price(symbol, price, side='buy')  # tick size
+            level = self._calculate_grid_level(base_price, grid_state.entry_price, self.config.grid.spacing)
             if level not in grid_state.grid_prices.grid_levels:
-                grid_state.grid_prices.add_level(level, price)
-
-            # 检查是否已存在
-            if price in grid_state.lower_orders:
-                logger.debug(f"{symbol} 下方网格已存在 @ {price:.6f}")
-                return
-
-            # FIX: 跨边价格验证 - 防止同价格买卖订单
-            if price in grid_state.upper_orders:
-                logger.error(f"{symbol} 价格冲突：上方网格已存在 @ {price:.6f}，拒绝挂下方网格")
-                return
+                grid_state.grid_prices.add_level(level, base_price)
 
             # 仅基础止盈（基础仓位的1/total_levels）
             client_order_id = self._make_client_order_id(
-                symbol, "buy", level=level, price=price, entry_price=grid_state.entry_price
+                symbol, "buy", level=level, price=base_price, entry_price=grid_state.entry_price
             )
             open_orders = self._get_open_orders_safe(symbol)
             existing_id = self._match_open_order_by_client_id(open_orders, client_order_id)
-            if not existing_id:
-                existing_id = self._match_open_order_by_price(
-                    symbol, open_orders, "buy", price
-                )
             if existing_id:
-                grid_state.lower_orders[price] = existing_id
-                logger.info(f"{symbol} lower grid already open @ {price:.6f}, skip")
+                existing_order = self._get_open_order_by_client_id(open_orders, client_order_id)
+                if existing_order and existing_order.price is not None:
+                    existing_price = self._quantize_price(symbol, existing_order.price, side=existing_order.side)
+                else:
+                    existing_price = base_price
+                grid_state.lower_orders[existing_price] = existing_id
+                logger.info(f"{symbol} lower grid already open @ {existing_price:.6f}, skip")
                 return
+
+            price = self._resolve_price_collision(
+                symbol, base_price, "buy", grid_state, open_orders=open_orders
+            )
+            if price != base_price:
+                grid_state.grid_prices.add_level(level, price)
 
             grid_margin = self.config.position.grid_margin
             amount = self._calculate_amount(symbol, grid_margin, grid_state.entry_price)
@@ -1361,19 +1393,14 @@ class GridStrategy:
             upper_fill: 对应的上方开仓信息
         """
         try:
-            price = self._quantize_price(symbol, price, side='buy')  # tick size
-            level = self._calculate_grid_level(price, grid_state.entry_price, self.config.grid.spacing)
+            base_price = self._quantize_price(symbol, price, side='buy')  # tick size
+            level = self._calculate_grid_level(base_price, grid_state.entry_price, self.config.grid.spacing)
             if level not in grid_state.grid_prices.grid_levels:
-                grid_state.grid_prices.add_level(level, price)
-
-            # FIX: 跨边价格验证 - 防止同价格买卖订单
-            if price in grid_state.upper_orders:
-                logger.error(f"{symbol} 价格冲突：上方网格已存在 @ {price:.6f}，拒绝挂止盈单")
-                return
+                grid_state.grid_prices.add_level(level, base_price)
 
             # FIX: 使用与开空单相同的数量（仅grid_margin）
             grid_margin = self.config.position.grid_margin
-            amount = self._calculate_amount(symbol, grid_margin, price)
+            amount = self._calculate_amount(symbol, grid_margin, base_price)
 
             logger.debug(f"{symbol} 止盈单: {amount}张")
 
@@ -1383,7 +1410,7 @@ class GridStrategy:
             )
 
             if not is_safe:
-                logger.error(f"{symbol} 拒绝挂止盈单 @ {price:.6f}: {warning}")
+                logger.error(f"{symbol} 拒绝挂止盈单 @ {base_price:.6f}: {warning}")
                 return
 
             if safe_amount < amount:
@@ -1391,16 +1418,26 @@ class GridStrategy:
                 amount = safe_amount
 
             client_order_id = self._make_client_order_id(
-                symbol, "buy", level=level, price=price, entry_price=grid_state.entry_price
+                symbol, "buy", level=level, price=base_price, entry_price=grid_state.entry_price
             )
             open_orders = self._get_open_orders_safe(symbol)
             existing_id = self._match_open_order_by_client_id(open_orders, client_order_id)
-            if not existing_id:
-                existing_id = self._match_open_order_by_price(symbol, open_orders, "buy", price)
             if existing_id:
-                grid_state.lower_orders[price] = existing_id
-                logger.info(f"{symbol} lower grid already open @ {price:.6f}, skip")
+                existing_order = self._get_open_order_by_client_id(open_orders, client_order_id)
+                if existing_order and existing_order.price is not None:
+                    existing_price = self._quantize_price(symbol, existing_order.price, side=existing_order.side)
+                else:
+                    existing_price = base_price
+                grid_state.lower_orders[existing_price] = existing_id
+                logger.info(f"{symbol} lower grid already open @ {existing_price:.6f}, skip")
                 return
+
+            price = self._resolve_price_collision(
+                symbol, base_price, "buy", grid_state, open_orders=open_orders
+            )
+            if price != base_price:
+                grid_state.grid_prices.add_level(level, price)
+                amount = self._calculate_amount(symbol, grid_margin, price)
 
             order = self._place_position_aware_buy_order(
                 symbol, price, amount, client_order_id=client_order_id
@@ -1584,7 +1621,23 @@ class GridStrategy:
         for price, order_id in list(grid_state.upper_orders.items()):
             order = orders.get(order_id)
 
-            if not order or order.status == 'filled':
+            if not order:
+                fetched = self._query_order_safe(symbol, order_id)
+                if fetched:
+                    status = (fetched.status or "").lower()
+                    if status in ("closed", "filled"):
+                        order = fetched
+                    elif status in ("canceled", "cancelled", "rejected", "expired"):
+                        del grid_state.upper_orders[price]
+                        logger.info(f"{symbol} 上方网格已取消 @ {price:.6f}, 等待补单")
+                        continue
+                    else:
+                        continue
+                else:
+                    continue
+
+            status = (order.status or "").lower()
+            if status in ("closed", "filled"):
                 # 订单成交
                 logger.info(f"上方网格成交: {symbol} @ {price:.6f}")
 
@@ -1621,7 +1674,23 @@ class GridStrategy:
         for price, order_id in list(grid_state.lower_orders.items()):
             order = orders.get(order_id)
 
-            if not order or order.status == 'filled':
+            if not order:
+                fetched = self._query_order_safe(symbol, order_id)
+                if fetched:
+                    status = (fetched.status or "").lower()
+                    if status in ("closed", "filled"):
+                        order = fetched
+                    elif status in ("canceled", "cancelled", "rejected", "expired"):
+                        del grid_state.lower_orders[price]
+                        logger.info(f"{symbol} 下方网格已取消 @ {price:.6f}, 等待补单")
+                        continue
+                    else:
+                        continue
+                else:
+                    continue
+
+            status = (order.status or "").lower()
+            if status in ("closed", "filled"):
                 # 订单成交（止盈）
                 logger.info(f"下方网格成交: {symbol} @ {price:.6f}")
 
@@ -1910,6 +1979,52 @@ class GridStrategy:
 
         quant = steps * d_tick
         return float(quant)
+
+    def _shift_price_by_tick(self, symbol: str, price: float, side: Optional[str]) -> float:
+        """Shift price by one tick to avoid collisions."""
+        tick_size = self._get_tick_size(symbol)
+        if tick_size <= 0:
+            return price
+
+        d_price = Decimal(str(price))
+        d_tick = Decimal(str(tick_size))
+
+        if side == 'sell':
+            return float(d_price + d_tick)
+        if side == 'buy':
+            shifted = d_price - d_tick
+            return float(shifted) if shifted > 0 else price
+        return float(d_price + d_tick)
+
+    def _resolve_price_collision(
+        self,
+        symbol: str,
+        price: float,
+        side: str,
+        grid_state: GridState,
+        open_orders: Optional[List[Order]] = None,
+        max_steps: int = 10
+    ) -> float:
+        """Resolve price collisions by shifting one tick at a time."""
+        candidate = self._quantize_price(symbol, price, side=side)
+        open_orders = open_orders if open_orders is not None else self._get_open_orders_safe(symbol)
+        open_prices: Set[float] = set()
+        for order in open_orders:
+            if order.price is None:
+                continue
+            open_prices.add(self._quantize_price(symbol, order.price, side=order.side))
+
+        for _ in range(max_steps + 1):
+            if (
+                candidate not in grid_state.upper_orders
+                and candidate not in grid_state.lower_orders
+                and candidate not in open_prices
+            ):
+                return candidate
+            candidate = self._shift_price_by_tick(symbol, candidate, side)
+
+        logger.warning(f"{symbol} price collision unresolved after {max_steps} ticks, use {candidate:.6f}")
+        return candidate
 
     def _get_cached_short_position(self, symbol: str, force_refresh: bool = False):
         """

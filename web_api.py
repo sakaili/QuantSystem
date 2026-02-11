@@ -217,8 +217,16 @@ class WebAPI:
             current_price = self.bot.connector.get_ticker_price(symbol)
             
             # 统计网格信息
-            upper_active = len([p for p in grid_state.upper_orders.keys() if p > grid_state.entry_price])
-            lower_active = len([p for p in grid_state.lower_orders.keys() if p < grid_state.entry_price])
+            upper_active = sum(
+                len(order_ids)
+                for price, order_ids in grid_state.upper_orders.items()
+                if price > grid_state.entry_price
+            )
+            lower_active = sum(
+                len(order_ids)
+                for price, order_ids in grid_state.lower_orders.items()
+                if price < grid_state.entry_price
+            )
             filled_upper = len(grid_state.filled_upper_grids)
             
             # 构建网格价格字典

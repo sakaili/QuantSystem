@@ -99,7 +99,8 @@ class TradingBot:
         )
 
         self.position_mgr = PositionManager(self.config_mgr, self.connector)
-        self.grid_strategy = GridStrategy(self.config_mgr, self.connector, self.position_mgr)
+        self.db = Database("data/database.db")
+        self.grid_strategy = GridStrategy(self.config_mgr, self.connector, self.position_mgr, db=self.db)
         self.risk_mgr = RiskManager(
             self.config_mgr, self.connector, self.position_mgr, self.grid_strategy
         )
@@ -126,8 +127,6 @@ class TradingBot:
         logger.info(f"账户余额: {self.capital_allocator.total_balance:.2f} USDT")
         logger.info(f"可用资金: {self.capital_allocator.available_capital:.2f} USDT ({self.capital_allocator.usage_ratio*100:.0f}%)")
         logger.info(f"每品种目标分配: {self.capital_allocator.per_symbol_target:.2f} USDT")
-
-        self.db = Database("data/database.db")
 
         # 状态
         self.state = BotState.IDLE

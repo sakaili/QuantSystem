@@ -56,6 +56,22 @@ class Database:
             )
         """)
 
+        # 网格循环表（上方开仓 -> 下方止盈）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS grid_cycles (
+                upper_order_id TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                upper_price REAL,
+                upper_amount REAL,
+                tp_order_id TEXT,
+                tp_price REAL,
+                tp_amount REAL,
+                status TEXT,
+                created_at TIMESTAMP,
+                updated_at TIMESTAMP
+            )
+        """)
+
         # 持仓表
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS positions (
@@ -177,6 +193,85 @@ class Database:
             self.conn.commit()
         except Exception as e:
             logger.error(f"保存预警失败: {e}")
+
+    def save_grid_cycle(self, cycle: Dict[str, Any]) -> None:
+        """保存或更新网格循环记录"""
+        try:
+            cursor = self.conn.cursor()
+            now = datetime.now()
+            cursor.execute("""
+                INSERT OR REPLACE INTO grid_cycles
+                (upper_order_id, symbol, upper_price, upper_amount, tp_order_id, tp_price, tp_amount, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(
+                    (SELECT created_at FROM grid_cycles WHERE upper_order_id = ?), ?
+                ), ?)
+            """, (
+                cycle.get("upper_order_id"),
+                cycle.get("symbol"),
+                cycle.get("upper_price"),
+                cycle.get("upper_amount"),
+                cycle.get("tp_order_id"),
+                cycle.get("tp_price"),
+                cycle.get("tp_amount"),
+                cycle.get("status", "open"),
+                cycle.get("upper_order_id"),
+                now,
+                now
+            ))
+            self.conn.commit()
+        except Exception as e:
+            logger.error(f"保存网格循环失败: {e}")
+
+    def load_open_grid_cycles(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """加载未完成的网格循环记录"""
+        try:
+            cursor = self.conn.cursor()
+            if symbol:
+                cursor.execute("""
+                    SELECT upper_order_id, symbol, upper_price, upper_amount,
+                           tp_order_id, tp_price, tp_amount, status, created_at, updated_at
+                    FROM grid_cycles
+                    WHERE symbol = ? AND status = 'open'
+                """, (symbol,))
+            else:
+                cursor.execute("""
+                    SELECT upper_order_id, symbol, upper_price, upper_amount,
+                           tp_order_id, tp_price, tp_amount, status, created_at, updated_at
+                    FROM grid_cycles
+                    WHERE status = 'open'
+                """)
+            rows = cursor.fetchall()
+            results = []
+            for row in rows:
+                results.append({
+                    "upper_order_id": row[0],
+                    "symbol": row[1],
+                    "upper_price": row[2],
+                    "upper_amount": row[3],
+                    "tp_order_id": row[4],
+                    "tp_price": row[5],
+                    "tp_amount": row[6],
+                    "status": row[7],
+                    "created_at": row[8],
+                    "updated_at": row[9]
+                })
+            return results
+        except Exception as e:
+            logger.error(f"加载网格循环失败: {e}")
+            return []
+
+    def close_grid_cycle_by_tp(self, tp_order_id: str) -> None:
+        """标记网格循环为已完成（按止盈单）"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                UPDATE grid_cycles
+                SET status = 'closed', updated_at = ?
+                WHERE tp_order_id = ?
+            """, (datetime.now(), tp_order_id))
+            self.conn.commit()
+        except Exception as e:
+            logger.error(f"关闭网格循环失败: {e}")
 
     def close(self) -> None:
         """关闭数据库连接"""

@@ -327,6 +327,8 @@ class TradingBot:
                 as_of=today,
                 bottom_n=self.config_mgr.screening.bottom_n,
                 timeframe="1d",
+                use_squeeze_filter=True,
+                squeeze_timeframe="4h",
                 funding_cooldown=0.2,
                 funding_rate_floor=self.config_mgr.screening.funding_rate_floor,
                 atr_spike_multiplier=self.config_mgr.screening.atr_spike_multiplier,
@@ -403,7 +405,7 @@ class TradingBot:
                 logger.info("已启用资金费率排序，严格按排序顺序开仓（手动币不插队）")
 
             # 2. 处理筛选出的候选币种
-            self.evaluate_new_entries(valid_candidates[:5])
+            self.evaluate_new_entries(valid_candidates)
 
             self.last_scan_date = today
 

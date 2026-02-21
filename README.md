@@ -105,6 +105,35 @@ python -c "from core.database import Database; db = Database('data/database.db')
 3. 上市时间: 必须>365天
 4. 资金费率: > 0 (多头付费给空头,空头收益)
 5. 波动性: ATR未暴涨
+6. (可选) 4H Squeeze Momentum < 0 (宏观跟随开仓)
+
+### 排序与得分
+
+候选币种默认按 `weighted_score` 排序，由高到低开仓补满（手动币种优先）。
+`weighted_score` 使用各指标的百分位排名（rank pct）归一化后加权求和：
+
+- squeeze_momentum（越负越好）: 0.35
+- squeeze_momentum_delta（越负越好）: 0.20
+- funding_rate_sum（越高越好）: 0.25  
+  - 若未提前计算，扫描阶段会自动回补 `funding_rate_sum`
+- EMA30 偏离（越大越好）: 0.20
+
+说明：若启用 `--funding-rate-sort`，则会按历史资金费率累加排序而不是 `weighted_score`。
+
+### 筛选排序的CLI选项
+
+```bash
+# 4H squeeze 过滤（默认关闭）
+python daily_candidate_scan.py --use-squeeze-filter --squeeze-timeframe 4h
+
+# 打印待开仓 TopN
+python daily_candidate_scan.py --select-top 3
+
+# 生成可视化（近一年价格 + squeeze动量）
+python daily_candidate_scan.py --plot-squeeze --plot-top 10
+```
+
+> 可视化需要 `matplotlib`，已加入 `requirements.txt`。
 
 ### 网格配置
 

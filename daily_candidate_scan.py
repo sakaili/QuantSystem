@@ -48,6 +48,114 @@ ATR_SPIKE_LOOKBACK = 3
 ATR_SPIKE_MULTIPLIER = 3.0
 BOTTOM_N = 50
 OUTPUT_DIR = Path("data/daily_scans")
+SQUEEZE_LEN = 20
+DEFAULT_SQUEEZE_TF = "4h"
+WEIGHTS = {
+    "squeeze_momentum": 0.35,
+    "squeeze_momentum_delta": 0.20,
+    "funding_rate": 0.25,
+    "price_deviation": 0.20,
+}
+
+# ================= SQUEEZE =================
+
+def _linreg_last(values: np.ndarray) -> Optional[float]:
+    n = len(values)
+    if n == 0:
+        return None
+    x = np.arange(n, dtype=float)
+    sum_x = x.sum()
+    sum_y = values.sum()
+    sum_xy = (x * values).sum()
+    sum_x2 = (x * x).sum()
+    denom = n * sum_x2 - sum_x * sum_x
+    if denom == 0:
+        return None
+    slope = (n * sum_xy - sum_x * sum_y) / denom
+    intercept = (sum_y - slope * sum_x) / n
+    return float(intercept + slope * (n - 1))
+
+
+def compute_squeeze_momentum(
+    history: pd.DataFrame,
+    *,
+    length: int = SQUEEZE_LEN,
+) -> Optional[float]:
+    if history is None or history.empty:
+        return None
+
+    min_bars = length * 2 - 1
+    if len(history) < min_bars:
+        return None
+
+    rolling_high = history["high"].rolling(window=length).max()
+    rolling_low = history["low"].rolling(window=length).min()
+    rolling_sma = history["close"].rolling(window=length).mean()
+    avg_hl = (rolling_high + rolling_low) / 2.0
+    avg_hl_sma = (avg_hl + rolling_sma) / 2.0
+    series = history["close"] - avg_hl_sma
+    series = series.dropna()
+
+    if len(series) < length:
+        return None
+
+    window = series.iloc[-length:].to_numpy(dtype=float, copy=False)
+    return _linreg_last(window)
+
+
+def compute_squeeze_series(
+    history: pd.DataFrame,
+    *,
+    length: int = SQUEEZE_LEN,
+) -> Optional[pd.Series]:
+    if history is None or history.empty:
+        return None
+
+    min_bars = length * 2 - 1
+    if len(history) < min_bars:
+        return None
+
+    rolling_high = history["high"].rolling(window=length).max()
+    rolling_low = history["low"].rolling(window=length).min()
+    rolling_sma = history["close"].rolling(window=length).mean()
+    avg_hl = (rolling_high + rolling_low) / 2.0
+    avg_hl_sma = (avg_hl + rolling_sma) / 2.0
+    series = history["close"] - avg_hl_sma
+    series = series.dropna()
+
+    if len(series) < length:
+        return None
+
+    return series.rolling(window=length).apply(_linreg_last, raw=True)
+
+
+def rank_score(series: pd.Series, *, higher_better: bool = True) -> pd.Series:
+    values = pd.to_numeric(series, errors="coerce")
+    ascending = not higher_better
+    return values.rank(pct=True, ascending=ascending, na_option="bottom")
+
+
+def apply_weighted_score(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        df["weighted_score"] = pd.Series(dtype=float)
+        return df
+
+    funding_series = df.get("funding_rate_sum")
+    if funding_series is None or funding_series.notna().sum() == 0:
+        funding_series = df["funding_rate"]
+
+    score_squeeze = rank_score(-df["squeeze_momentum"])
+    score_squeeze_delta = rank_score(-df["squeeze_momentum_delta"])
+    score_funding = rank_score(funding_series)
+    score_deviation = rank_score(df["price_deviation"])
+
+    df["weighted_score"] = (
+        WEIGHTS["squeeze_momentum"] * score_squeeze
+        + WEIGHTS["squeeze_momentum_delta"] * score_squeeze_delta
+        + WEIGHTS["funding_rate"] * score_funding
+        + WEIGHTS["price_deviation"] * score_deviation
+    )
+    return df
 
 # ================= 数据结构 =================
 
@@ -65,6 +173,8 @@ class Candidate:
     ema20: float
     ema30: float
     atr14: float
+    squeeze_momentum: Optional[float]
+    squeeze_momentum_delta: Optional[float]
     latest_close: float
     price_deviation: float   # (EMA30 - close) / EMA30
 
@@ -109,6 +219,34 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--air-mean-corr-drop-rate-limit", type=float, default=0.05)
     parser.add_argument("--air-mean-residual-z", type=float, default=2.5)
     parser.add_argument("--air-mean-residual-rate-limit", type=float, default=0.01)
+    parser.add_argument(
+        "--use-squeeze-filter",
+        action="store_true",
+        help="Enable 4H squeeze momentum < 0 filter (default off)."
+    )
+    parser.add_argument(
+        "--squeeze-timeframe",
+        type=str,
+        default=DEFAULT_SQUEEZE_TF,
+        help="Timeframe for squeeze momentum (default: 4h)."
+    )
+    parser.add_argument(
+        "--plot-squeeze",
+        action="store_true",
+        help="Plot last-year price + squeeze momentum for top candidates."
+    )
+    parser.add_argument(
+        "--plot-top",
+        type=int,
+        default=10,
+        help="Number of top candidates to plot."
+    )
+    parser.add_argument(
+        "--select-top",
+        type=int,
+        default=3,
+        help="Print top-N symbols for opening positions."
+    )
     return parser.parse_args()
 
 
@@ -479,6 +617,8 @@ def build_candidates(
     meta_map: Dict[str, SymbolMetadata],
     *,
     timeframe: str,
+    use_squeeze_filter: bool = False,
+    squeeze_timeframe: str = DEFAULT_SQUEEZE_TF,
     funding_cooldown: float,
     as_of_date: date,
     funding_rate_floor: float = FUNDING_RATE_FLOOR,
@@ -486,6 +626,7 @@ def build_candidates(
     binance_component_max_weight: float = 0.8,
     binance_component_weight_strict: bool = True,
     histories: Optional[Dict[str, pd.DataFrame]] = None,
+    squeeze_histories: Optional[Dict[str, pd.DataFrame]] = None,
 ) -> List[Candidate]:
 
     if histories is None:
@@ -493,6 +634,13 @@ def build_candidates(
         start_dt = end_dt - timedelta(days=200)
         histories = fetcher.fetch_bulk_history(
             symbols, start=start_dt, end=end_dt, timeframe=timeframe
+        )
+
+    if squeeze_histories is None:
+        end_dt = datetime.combine(as_of_date, datetime.max.time(), tzinfo=timezone.utc)
+        start_dt = end_dt - timedelta(days=200)
+        squeeze_histories = fetcher.fetch_bulk_history(
+            symbols, start=start_dt, end=end_dt, timeframe=squeeze_timeframe
         )
 
     # ⭐ 优化：批量异步获取所有币种的资金费率（避免速率限制）
@@ -526,25 +674,17 @@ def build_candidates(
         if funding is not None and funding < funding_rate_floor:
             continue
 
-        # 🔧 NEW: 指数成分必须包含Binance
-        market_id = meta_map[symbol].market_id if symbol in meta_map else None
-        if not fetcher.index_has_binance_component(symbol, market_id=market_id):
-            logger.info("Skip %s: index has no Binance component", symbol)
-            continue
+        squeeze_val = None
+        squeeze_delta = None
+        sq_history = squeeze_histories.get(symbol) if squeeze_histories else None
+        if sq_history is not None and not sq_history.empty:
+            squeeze_val = compute_squeeze_momentum(sq_history, length=SQUEEZE_LEN)
+            squeeze_series = compute_squeeze_series(sq_history, length=SQUEEZE_LEN)
+            if squeeze_series is not None and len(squeeze_series) >= 2:
+                squeeze_delta = float(squeeze_series.iloc[-1] - squeeze_series.iloc[-2])
 
-        binance_weight = fetcher.index_binance_component_weight(symbol, market_id=market_id)
-        if binance_weight is None:
-            if binance_component_weight_strict:
-                logger.info("Skip %s: Binance component weight unavailable", symbol)
-                continue
-        else:
-            if binance_weight >= binance_component_max_weight:
-                logger.info(
-                    "Skip %s: Binance component weight %.2f >= %.2f",
-                    symbol,
-                    binance_weight,
-                    binance_component_max_weight,
-                )
+        if use_squeeze_filter:
+            if squeeze_val is None or squeeze_val >= 0:
                 continue
 
         last = history.iloc[-1]
@@ -567,6 +707,8 @@ def build_candidates(
                 ema20=float(last["ema20"]),
                 ema30=ema30,
                 atr14=float(last["atr14"]),
+                squeeze_momentum=squeeze_val,
+                squeeze_momentum_delta=squeeze_delta,
                 latest_close=close,
                 price_deviation=deviation,
             )
@@ -580,6 +722,8 @@ def run_scan(
     as_of: date,
     bottom_n: int,
     timeframe: str,
+    use_squeeze_filter: bool = False,
+    squeeze_timeframe: str = DEFAULT_SQUEEZE_TF,
     funding_cooldown: float,
     funding_rate_floor: float = FUNDING_RATE_FLOOR,
     atr_spike_multiplier: float = ATR_SPIKE_MULTIPLIER,
@@ -638,12 +782,20 @@ def run_scan(
         end=end_dt,
         timeframe=timeframe,
     )
+    squeeze_histories = fetcher.fetch_bulk_history(
+        air_pool,
+        start=start_dt,
+        end=end_dt,
+        timeframe=squeeze_timeframe,
+    )
 
     candidates = build_candidates(
         fetcher,
         air_pool,
         meta_map,
         timeframe=timeframe,
+        use_squeeze_filter=use_squeeze_filter,
+        squeeze_timeframe=squeeze_timeframe,
         funding_cooldown=funding_cooldown,
         as_of_date=as_of,
         funding_rate_floor=funding_rate_floor,
@@ -651,6 +803,7 @@ def run_scan(
         binance_component_max_weight=binance_component_max_weight,
         binance_component_weight_strict=binance_component_weight_strict,
         histories=pool_histories,
+        squeeze_histories=squeeze_histories,
     )
 
     df = pd.DataFrame([c.__dict__ for c in candidates])
@@ -746,9 +899,78 @@ def run_scan(
             df.sort_values("funding_rate_sum", ascending=False, inplace=True)
     else:
         # ⭐ 核心排序：按价格偏离度
-        df.sort_values("price_deviation", ascending=False, inplace=True)
+        if "funding_rate_sum" not in df.columns or df["funding_rate_sum"].notna().sum() == 0:
+            sums = fetch_funding_rate_sums(
+                fetcher,
+                df["symbol"].tolist(),
+                as_of_date=as_of,
+                lookback_days=funding_rate_lookback_days,
+            )
+            df["funding_rate_sum"] = df["symbol"].map(sums)
+        df = apply_weighted_score(df)
+        df.sort_values(
+            ["weighted_score", "price_deviation"],
+            ascending=[False, False],
+            inplace=True
+        )
 
     return df
+
+
+def plot_squeeze_for_symbols(
+    fetcher: BinanceDataFetcher,
+    symbols: List[str],
+    *,
+    as_of_date: date,
+    timeframe: str = DEFAULT_SQUEEZE_TF,
+    length: int = SQUEEZE_LEN,
+    output_dir: Path,
+) -> None:
+    if not symbols:
+        return
+
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError as exc:
+        raise RuntimeError("matplotlib is required for plotting. Please install it.") from exc
+
+    end_dt = datetime.combine(as_of_date, datetime.max.time(), tzinfo=timezone.utc)
+    start_dt = end_dt - timedelta(days=365)
+
+    histories = fetcher.fetch_bulk_history(
+        symbols, start=start_dt, end=end_dt, timeframe=timeframe
+    )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for symbol, history in histories.items():
+        if history.empty:
+            continue
+
+        history = history.sort_values("timestamp")
+        history = history[history["timestamp"] >= start_dt]
+        if history.empty:
+            continue
+
+        squeeze_series = compute_squeeze_series(history, length=length)
+        if squeeze_series is None:
+            continue
+
+        fig, (ax_price, ax_sq) = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+        ax_price.plot(history["timestamp"], history["close"], color="tab:blue")
+        ax_price.set_title(f"{symbol} Price ({timeframe}) - Last 1Y")
+        ax_price.set_ylabel("Close")
+
+        sq_ts = history.loc[squeeze_series.index, "timestamp"]
+        ax_sq.plot(sq_ts, squeeze_series, color="tab:orange")
+        ax_sq.axhline(0, color="gray", linewidth=1)
+        ax_sq.set_title(f"Squeeze Momentum (len={length})")
+        ax_sq.set_ylabel("Squeeze")
+
+        fig.tight_layout()
+        safe_symbol = symbol.replace("/", "").replace(":", "")
+        fig.savefig(output_dir / f"{safe_symbol}_squeeze.png", dpi=150)
+        plt.close(fig)
 
 
 def main() -> None:
@@ -763,6 +985,8 @@ def main() -> None:
         as_of=as_of,
         bottom_n=args.bottom_n,
         timeframe=args.timeframe,
+        use_squeeze_filter=args.use_squeeze_filter,
+        squeeze_timeframe=args.squeeze_timeframe,
         funding_cooldown=args.cooldown,
         funding_rate_floor=args.funding_rate_floor,
         atr_spike_multiplier=args.atr_spike_multiplier,
@@ -796,6 +1020,22 @@ def main() -> None:
     out = args.output_dir / f"candidates_{as_of:%Y%m%d}.csv"
     df.to_csv(out, index=False)
     print(f"Wrote {len(df)} candidates -> {out}")
+    if not df.empty:
+        top_symbols = df["symbol"].head(args.select_top).tolist()
+        print(f"待开仓候选 Top{args.select_top}: {top_symbols}")
+
+    if args.plot_squeeze and not df.empty:
+        plot_symbols = df["symbol"].head(args.plot_top).tolist()
+        plot_dir = args.output_dir / f"squeeze_plots_{as_of:%Y%m%d}"
+        plot_squeeze_for_symbols(
+            fetcher=BinanceDataFetcher(),
+            symbols=plot_symbols,
+            as_of_date=as_of,
+            timeframe=args.squeeze_timeframe,
+            length=SQUEEZE_LEN,
+            output_dir=plot_dir,
+        )
+        print(f"Saved squeeze plots -> {plot_dir}")
 
 def ensure_ema5(history: pd.DataFrame) -> pd.DataFrame:
     """

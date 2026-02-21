@@ -199,6 +199,17 @@ class GridStrategy:
         """Count total orders in price->list map."""
         return sum(len(order_ids) for order_ids in orders.values())
 
+    def _is_price_too_close(self, target_price: float, existing_prices: List[float], min_gap_ratio: float) -> bool:
+        """Return True if target_price is within min_gap_ratio of any existing price."""
+        if target_price <= 0 or min_gap_ratio <= 0:
+            return False
+        for price in existing_prices:
+            if price <= 0:
+                continue
+            if abs(target_price - price) / target_price < min_gap_ratio:
+                return True
+        return False
+
     def _has_tp_for_upper(self, grid_state: GridState, upper_order_id: str) -> bool:
         """Return True if any TP is mapped to upper_order_id."""
         return upper_order_id in grid_state.tp_to_upper.values()
@@ -1295,14 +1306,23 @@ class GridStrategy:
             reopen_price = self._quantize_price(
                 symbol, current_price * (1 + spacing), side='sell'
             )
-            self._place_single_upper_grid_by_price(symbol, grid_state, reopen_price)
-            logger.info(
-                f"{symbol} 滚动窗口：重新开空 @ {reopen_price:.6f} "
-                f"(成交价={filled_price:.6f})"
-            )
+            min_gap_ratio = max(0.0, self.config.grid.reopen_min_gap_ratio) * spacing
+            if self._is_price_too_close(reopen_price, upper_prices, min_gap_ratio):
+                reopen_placed = False
+                logger.info(
+                    f"{symbol} 滚动窗口：重新开空过近 @ {reopen_price:.6f} "
+                    f"(min_gap={min_gap_ratio:.4f})，跳过"
+                )
+            else:
+                reopen_placed = self._place_single_upper_grid_by_price(symbol, grid_state, reopen_price)
+                if reopen_placed:
+                    logger.info(
+                        f"{symbol} 滚动窗口：重新开空 @ {reopen_price:.6f} "
+                        f"(成交价={filled_price:.6f})"
+                    )
 
             # 2) 移除最远的上方网格（保持窗口大小）
-            if upper_prices:
+            if reopen_placed and upper_prices:
                 max_upper_price = max(upper_prices)
                 self._remove_grid_by_price(symbol, grid_state, max_upper_price, is_upper=True)
                 logger.info(f"{symbol} 滚动窗口：移除最远上方网格 @ {max_upper_price:.6f}")
@@ -1427,12 +1447,15 @@ class GridStrategy:
 
     # ==================== 新增：基于价格的网格操作函数 ====================
 
-    def _place_single_upper_grid_by_price(self, symbol: str, grid_state: GridState, price: float) -> None:
+    def _place_single_upper_grid_by_price(self, symbol: str, grid_state: GridState, price: float) -> bool:
         """
         Place a single upper grid order by price.
         """
         try:
             base_price = self._quantize_price(symbol, price, side='sell')
+            if base_price in grid_state.upper_orders:
+                logger.info(f"{symbol} upper grid already exists @ {base_price:.6f}, skip")
+                return False
             level = self._calculate_grid_level(base_price, grid_state.entry_price, self.config.grid.spacing)
             if level not in grid_state.grid_prices.grid_levels:
                 grid_state.grid_prices.add_level(level, base_price)
@@ -1457,9 +1480,11 @@ class GridStrategy:
 
             self._add_order_id(grid_state.upper_orders, price, order.order_id)
             logger.info(f"{symbol} upper grid order placed @ {price:.6f}, {amount} contracts")
+            return True
 
         except Exception as e:
             logger.warning(f"{symbol} upper grid order failed @ {price:.6f}: {e}")
+            return False
 
     def _place_single_lower_grid_by_price(self, symbol: str, grid_state: GridState, price: float) -> None:
         """

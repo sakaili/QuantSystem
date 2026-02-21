@@ -46,6 +46,7 @@ class GridConfig:
     dynamic_expansion: bool = True
     max_total_grids: int = 30
     max_side_grids: int = 15
+    reopen_min_gap_ratio: float = 0.5
 
 
 @dataclass

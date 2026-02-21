@@ -1,91 +1,92 @@
-# 策略参数配置
+﻿# 绛栫暐鍙傛暟閰嶇疆
 # Strategy Configuration
 version: "1.0"
 
-# 账户配置 - Account Settings
+# 璐︽埛閰嶇疆 - Account Settings
 account:
-  # size: 100.0                 # 已移除:不再硬编码账户规模,改为启动时动态获取
-  usage_ratio: 0.9              # 资金使用率(90%用于交易,10%作缓冲)
-  leverage: 2                   # 杠杆倍数
-  order_type: "post_only"       # 订单类型(仅Maker订单)
-  maker_fee: 0.0002             # Maker手续费 0.02%
+  # size: 100.0                 # 宸茬Щ闄?涓嶅啀纭紪鐮佽处鎴疯妯?鏀逛负鍚姩鏃跺姩鎬佽幏鍙?
+  usage_ratio: 0.9              # 璧勯噾浣跨敤鐜?90%鐢ㄤ簬浜ゆ槗,10%浣滅紦鍐?
+  leverage: 2                   # 鏉犳潌鍊嶆暟
+  order_type: "post_only"       # 璁㈠崟绫诲瀷(浠匨aker璁㈠崟)
+  maker_fee: 0.0002             # Maker鎵嬬画璐?0.02%
 
-# 网格配置 - Grid Settings
+# 缃戞牸閰嶇疆 - Grid Settings
 grid:
-  count: 10                     # 网格总数 (从20改为10)
-  spacing: 0.015                # 网格间距(1.5%)
-  upper_grids: 5                # 上方网格数(开空,从10改为5)
-  lower_grids: 5                # 下方网格数(平空,从10改为5)
+  count: 10                     # 缃戞牸鎬绘暟 (浠?0鏀逛负10)
+  spacing: 0.015                # 缃戞牸闂磋窛(1.5%)
+  upper_grids: 5                # 涓婃柟缃戞牸鏁?寮€绌?浠?0鏀逛负5)
+  lower_grids: 5                # 涓嬫柟缃戞牸鏁?骞崇┖,浠?0鏀逛负5)
 
-  # 网格修复配置
-  repair_enabled: true          # 启用自动修复
-  repair_interval: 10           # 每10秒检查一次
-  max_repair_retries: 3         # 单个网格最多重试3次
-  min_success_rate_upper: 0.8   # 上方网格最低80%成功率
-  min_success_rate_lower: 0.8   # 下方网格最低80%成功率
+  # 缃戞牸淇閰嶇疆
+  repair_enabled: true          # 鍚敤鑷姩淇
+  repair_interval: 10           # 姣?0绉掓鏌ヤ竴娆?
+  max_repair_retries: 3         # 鍗曚釜缃戞牸鏈€澶氶噸璇?娆?
+  min_success_rate_upper: 0.8   # 涓婃柟缃戞牸鏈€浣?0%鎴愬姛鐜?
+  min_success_rate_lower: 0.8   # 涓嬫柟缃戞牸鏈€浣?0%鎴愬姛鐜?
 
-  # 移动网格配置（无限网格策略）
-  dynamic_expansion: true       # 启用动态扩展
-  max_total_grids: 999          # 最大总网格数（设为999实现无限网格）
-  max_side_grids: 999           # 单侧最多网格数（设为999实现无限网格）
+  # 绉诲姩缃戞牸閰嶇疆锛堟棤闄愮綉鏍肩瓥鐣ワ級
+  dynamic_expansion: true       # 鍚敤鍔ㄦ€佹墿灞?
+  max_total_grids: 999          # 鏈€澶ф€荤綉鏍兼暟锛堣涓?99瀹炵幇鏃犻檺缃戞牸锛?
+  max_side_grids: 999           # 鍗曚晶鏈€澶氱綉鏍兼暟锛堣涓?99瀹炵幇鏃犻檺缃戞牸锛?
+  reopen_min_gap_ratio: 0.5     # 重新开空与已有上方挂单最小间距(占spacing比例)
 
-# 仓位配置 - Position Settings
+# 浠撲綅閰嶇疆 - Position Settings
 position:
-  max_symbols: 3                # 最多持仓币种数(3个品种同时交易)
-  base_margin: 30.0             # 🔧 FIX: 基础仓位保证金(USDT,每品种) - 从35降至30以符合90%资金约束
-  grid_margin: 10.0             # 🔧 FIX: 单网格保证金(USDT,每品种) - 从15降至13以符合90%资金约束
-  manual_symbols: [1000WHYUSDT]            # 手动指定必开币种(占用max_symbols配额), 例: ["BTCUSDT", "ETHUSDT"]
-  min_base_position_ratio: 0.6  # 最小保留基础仓位比例(60%)
-  # single_symbol_max: 改为动态计算 = (账户余额 × 0.9) / 5
-  # total_margin_limit: 改为动态计算 = 账户余额 × 0.9
+  max_symbols: 9                # 鏈€澶氭寔浠撳竵绉嶆暟(9涓搧绉嶅悓鏃朵氦鏄?
+  base_margin: 20.0             # 鍩虹浠撲綅淇濊瘉閲?USDT,姣忓搧绉?
+  grid_margin: 7.0              # 鍗曠綉鏍间繚璇侀噾(USDT,姣忓搧绉?
+  manual_symbols: [1000WHYUSDT]            # 鎵嬪姩鎸囧畾蹇呭紑甯佺(鍗犵敤max_symbols閰嶉), 渚? ["BTCUSDT", "ETHUSDT"]
+  min_base_position_ratio: 0.6  # 鏈€灏忎繚鐣欏熀纭€浠撲綅姣斾緥(60%)
+  # single_symbol_max: 鏀逛负鍔ㄦ€佽绠?= (璐︽埛浣欓 脳 0.9) / 5
+  # total_margin_limit: 鏀逛负鍔ㄦ€佽绠?= 璐︽埛浣欓 脳 0.9
 
-# 币种筛选 - Screening Criteria
+# 甯佺绛涢€?- Screening Criteria
 screening:
-  bottom_n: 50                  # 流动性排名倒数N
-  min_listing_days: 300         # 最小上市天数
-  funding_rate_floor: 0.0       # 资金费率下限(>0,多头付费给空头)
-  atr_spike_multiplier: 3.0     # ATR暴涨倍数阈值
-  funding_rate_sort: true       # 是否按历史累计资金费率排序
-  funding_rate_lookback_days: 0 # 统计窗口(0=尽可能全历史)
-  funding_rate_min_sum: 0.0     # 最小累计资金费率(筛选用)
-  eth_deviation_filter: true    # 启用ETH偏离筛选
-  eth_deviation_window: 60      # 滚动窗口(天)
-  eth_deviation_cooldown_days: 365       # 最近N天发生偏离直接剔除
-  eth_deviation_rate_window_days: 180    # 统计偏离频率窗口
-  eth_deviation_ever: true               # 豁免模式：只看最近N天是否偏离
-  eth_corr_drop_threshold: 0.2           # corr_drop阈值
-  eth_corr_drop_rate_limit: 0.05         # corr_drop频率上限
-  eth_residual_z: 2.5                    # 残差z阈值
-  eth_residual_rate_limit: 0.01          # 残差偏离频率上限
-  binance_component_max_weight: 0.8      # Binance成分占比上限(<=80%)
-  binance_component_weight_strict: true  # 无法获取占比时是否剔除
-  air_mean_deviation_filter: true        # 启用垃圾币均值偏离筛选
-  air_mean_use_median: true              # 使用中位数(更抗极端值)
-  air_mean_deviation_window: 60          # 滚动窗口(天)
-  air_mean_deviation_cooldown_days: 365  # 最近N天发生偏离直接剔除
-  air_mean_deviation_rate_window_days: 180  # 统计偏离频率窗口
-  air_mean_deviation_ever: true          # 豁免模式：只看最近N天是否偏离
-  air_mean_corr_drop_threshold: 0.2      # corr_drop阈值
-  air_mean_corr_drop_rate_limit: 0.05    # corr_drop频率上限
-  air_mean_residual_z: 2.5               # 残差z阈值
-  air_mean_residual_rate_limit: 0.01     # 残差偏离频率上限
+  bottom_n: 50                  # 娴佸姩鎬ф帓鍚嶅€掓暟N
+  min_listing_days: 300         # 鏈€灏忎笂甯傚ぉ鏁?
+  funding_rate_floor: 0.0       # 璧勯噾璐圭巼涓嬮檺(>0,澶氬ご浠樿垂缁欑┖澶?
+  atr_spike_multiplier: 3.0     # ATR鏆存定鍊嶆暟闃堝€?
+  funding_rate_sort: true       # 鏄惁鎸夊巻鍙茬疮璁¤祫閲戣垂鐜囨帓搴?
+  funding_rate_lookback_days: 0 # 缁熻绐楀彛(0=灏藉彲鑳藉叏鍘嗗彶)
+  funding_rate_min_sum: 0.0     # 鏈€灏忕疮璁¤祫閲戣垂鐜?绛涢€夌敤)
+  eth_deviation_filter: true    # 鍚敤ETH鍋忕绛涢€?
+  eth_deviation_window: 60      # 婊氬姩绐楀彛(澶?
+  eth_deviation_cooldown_days: 365       # 鏈€杩慛澶╁彂鐢熷亸绂荤洿鎺ュ墧闄?
+  eth_deviation_rate_window_days: 180    # 缁熻鍋忕棰戠巼绐楀彛
+  eth_deviation_ever: true               # 璞佸厤妯″紡锛氬彧鐪嬫渶杩慛澶╂槸鍚﹀亸绂?
+  eth_corr_drop_threshold: 0.2           # corr_drop闃堝€?
+  eth_corr_drop_rate_limit: 0.05         # corr_drop棰戠巼涓婇檺
+  eth_residual_z: 2.5                    # 娈嬪樊z闃堝€?
+  eth_residual_rate_limit: 0.01          # 娈嬪樊鍋忕棰戠巼涓婇檺
+  binance_component_max_weight: 0.8      # Binance鎴愬垎鍗犳瘮涓婇檺(<=80%)
+  binance_component_weight_strict: true  # 鏃犳硶鑾峰彇鍗犳瘮鏃舵槸鍚﹀墧闄?
+  air_mean_deviation_filter: true        # 鍚敤鍨冨溇甯佸潎鍊煎亸绂荤瓫閫?
+  air_mean_use_median: true              # 浣跨敤涓綅鏁?鏇存姉鏋佺鍊?
+  air_mean_deviation_window: 60          # 婊氬姩绐楀彛(澶?
+  air_mean_deviation_cooldown_days: 365  # 鏈€杩慛澶╁彂鐢熷亸绂荤洿鎺ュ墧闄?
+  air_mean_deviation_rate_window_days: 180  # 缁熻鍋忕棰戠巼绐楀彛
+  air_mean_deviation_ever: true          # 璞佸厤妯″紡锛氬彧鐪嬫渶杩慛澶╂槸鍚﹀亸绂?
+  air_mean_corr_drop_threshold: 0.2      # corr_drop闃堝€?
+  air_mean_corr_drop_rate_limit: 0.05    # corr_drop棰戠巼涓婇檺
+  air_mean_residual_z: 2.5               # 娈嬪樊z闃堝€?
+  air_mean_residual_rate_limit: 0.01     # 娈嬪樊鍋忕棰戠巼涓婇檺
 
-# 交易时间 - Schedule
+# 浜ゆ槗鏃堕棿 - Schedule
 schedule:
-  scan_hour: 0                  # 每日筛选时间(UTC小时)
-  scan_interval: 86400          # 筛选间隔(秒)
-  monitor_interval: 10          # 监控循环间隔(秒)
+  scan_hour: 0                  # 姣忔棩绛涢€夋椂闂?UTC灏忔椂)
+  scan_interval: 86400          # 绛涢€夐棿闅?绉?
+  monitor_interval: 10          # 鐩戞帶寰幆闂撮殧(绉?
 
-# 换仓配置 - Rebalancing Settings
+# 鎹粨閰嶇疆 - Rebalancing Settings
 rebalancing:
-  enabled: true                  # 启用盈利换仓（当盈利达标且不在候选币中时）
-  profit_threshold: 0.15        # 盈利目标(15%)
-  cooldown_hours: 24            # 冷却期(小时)
-  max_rebalances_per_day: 3     # 单日最大换仓次数
+  enabled: true                  # 鍚敤鐩堝埄鎹粨锛堝綋鐩堝埄杈炬爣涓斾笉鍦ㄥ€欓€夊竵涓椂锛?
+  profit_threshold: 0.15        # 鐩堝埄鐩爣(15%)
+  cooldown_hours: 24            # 鍐峰嵈鏈?灏忔椂)
+  max_rebalances_per_day: 3     # 鍗曟棩鏈€澶ф崲浠撴鏁?
 
-# Web 仪表板配置 - Web Dashboard Settings
+# Web 浠〃鏉块厤缃?- Web Dashboard Settings
 web_dashboard:
-  enabled: true                  # 启用 Web 仪表板
-  host: "0.0.0.0"               # 监听地址 (0.0.0.0 允许外部访问)
-  port: 5000                    # 监听端口
-  debug: false                  # 调试模式
+  enabled: true                  # 鍚敤 Web 浠〃鏉?
+  host: "0.0.0.0"               # 鐩戝惉鍦板潃 (0.0.0.0 鍏佽澶栭儴璁块棶)
+  port: 5000                    # 鐩戝惉绔彛
+  debug: false                  # 璋冭瘯妯″紡

@@ -47,6 +47,10 @@ class GridConfig:
     max_total_grids: int = 30
     max_side_grids: int = 15
     reopen_min_gap_ratio: float = 0.5
+    rebase_enabled: bool = True
+    rebase_distance_k: float = 6.0
+    rebase_confirm_hours: int = 12
+    rebase_cooldown_hours: int = 12
 
 
 @dataclass
@@ -356,6 +360,13 @@ class ConfigManager:
         # 验证网格间距合理性
         if self.grid.spacing < 0.005 or self.grid.spacing > 0.05:
             raise ConfigurationError("网格间距应在0.5%-5%之间")
+
+        if self.grid.rebase_distance_k < 0:
+            raise ConfigurationError("rebase_distance_k 不能为负数")
+        if self.grid.rebase_confirm_hours < 0:
+            raise ConfigurationError("rebase_confirm_hours 不能为负数")
+        if self.grid.rebase_cooldown_hours < 0:
+            raise ConfigurationError("rebase_cooldown_hours 不能为负数")
 
         # 验证网格修复配置
         if self.grid.repair_interval < 5:

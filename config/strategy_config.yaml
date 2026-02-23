@@ -29,6 +29,10 @@ grid:
   max_total_grids: 999          # 鏈€澶ф€荤綉鏍兼暟锛堣涓?99瀹炵幇鏃犻檺缃戞牸锛?
   max_side_grids: 999           # 鍗曚晶鏈€澶氱綉鏍兼暟锛堣涓?99瀹炵幇鏃犻檺缃戞牸锛?
   reopen_min_gap_ratio: 0.5     # 重新开空与已有上方挂单最小间距(占spacing比例)
+  rebase_enabled: true          # 启用软重建
+  rebase_distance_k: 6          # 触发阈值=K*spacing
+  rebase_confirm_hours: 12      # 持续偏离确认时长(小时)
+  rebase_cooldown_hours: 12     # 重建冷却时间(小时)
 
 # 浠撲綅閰嶇疆 - Position Settings
 position:

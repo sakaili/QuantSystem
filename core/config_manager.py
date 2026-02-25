@@ -61,6 +61,16 @@ class PositionConfig:
     grid_margin: float          # 单网格保证金
     manual_symbols: List[str] = field(default_factory=list)  # 手动指定必开币种
     min_base_position_ratio: float = 0.3  # 最小保留基础仓位比例（默认30%）
+    scale_enabled: bool = True
+    scale_step_pct: float = 0.10
+    scale_drawdown_pct: float = 0.10
+    scale_cooldown_days: int = 7
+    scale_max_symbols: int = 20
+    scale_min_symbols: int = 3
+    scale_safety: float = 1.3
+    scale_expand_threshold_symbols: int = 12
+    scale_base_step: float = 2.0
+    scale_grid_step: float = 1.0
     # single_symbol_max: 已移除,改为动态计算
     # total_margin_limit: 已移除,改为动态计算
 
@@ -380,6 +390,22 @@ class ConfigManager:
 
         if not (0 < self.grid.min_success_rate_lower <= 1):
             raise ConfigurationError("下方网格成功率阈值必须在(0, 1]范围内")
+
+        # 验证动态扩张配置
+        if self.position.scale_step_pct <= 0 or self.position.scale_step_pct > 1:
+            raise ConfigurationError("scale_step_pct 必须在(0, 1]范围内")
+        if self.position.scale_drawdown_pct <= 0 or self.position.scale_drawdown_pct > 1:
+            raise ConfigurationError("scale_drawdown_pct 必须在(0, 1]范围内")
+        if self.position.scale_cooldown_days < 0:
+            raise ConfigurationError("scale_cooldown_days 不能为负数")
+        if self.position.scale_max_symbols < 1:
+            raise ConfigurationError("scale_max_symbols 必须>=1")
+        if self.position.scale_min_symbols < 1:
+            raise ConfigurationError("scale_min_symbols 必须>=1")
+        if self.position.scale_max_symbols < self.position.scale_min_symbols:
+            raise ConfigurationError("scale_max_symbols 不能小于 scale_min_symbols")
+        if self.position.scale_safety <= 0:
+            raise ConfigurationError("scale_safety 必须>0")
 
         # 验证移动网格配置
         if self.grid.max_total_grids < self.grid.count:

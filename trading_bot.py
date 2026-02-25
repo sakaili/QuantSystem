@@ -133,6 +133,11 @@ class TradingBot:
         self.running = True
         self.last_scan_date: Optional[date] = None
         self.current_candidates: List[str] = []  # 当前有效候选币种列表
+        self.scale_high_water: Optional[float] = None
+        self.scale_anchor_equity: Optional[float] = None
+        self.last_scale_time: Optional[datetime] = None
+        self.base_margin_floor = self.config_mgr.position.base_margin
+        self.grid_margin_floor = self.config_mgr.position.grid_margin
 
         # 信号处理
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -190,6 +195,9 @@ class TradingBot:
                 # 3.5. 盈利监控与换仓(如果启用)
                 if self.config_mgr.rebalancing.enabled:
                     self.monitor_profit_rebalancing()
+
+                # 3.55. 动态扩展持仓上限与额度
+                self.maybe_scale_capacity()
 
                 # 3.6. 🔧 NEW: 检查是否需要补充新品种
                 self.check_and_fill_positions()
@@ -670,6 +678,97 @@ class TradingBot:
         if self._loop_count % 10 == 0:
             logger.info(f"状态: {self.state.value}")
             logger.info(str(self.position_mgr))
+
+    def _apply_scaled_capacity(self, equity: float) -> None:
+        available = equity * self.config_mgr.account.usage_ratio
+        self.capital_allocator.total_balance = equity
+        self.capital_allocator.available_capital = available
+        self.capital_allocator.max_symbols = self.config_mgr.position.max_symbols
+        if self.capital_allocator.max_symbols > 0:
+            self.capital_allocator.per_symbol_target = (
+                available / self.capital_allocator.max_symbols
+            )
+
+    def maybe_scale_capacity(self) -> None:
+        cfg = self.config_mgr.position
+        if not cfg.scale_enabled:
+            return
+
+        equity = self.position_mgr.total_balance or self.capital_allocator.total_balance
+        if equity <= 0:
+            return
+
+        now = datetime.now(timezone.utc)
+        if self.scale_high_water is None:
+            self.scale_high_water = equity
+        if self.scale_anchor_equity is None:
+            self.scale_anchor_equity = equity
+
+        if equity > self.scale_high_water:
+            self.scale_high_water = equity
+
+        cooldown_seconds = cfg.scale_cooldown_days * 86400
+        if self.last_scale_time and (now - self.last_scale_time).total_seconds() < cooldown_seconds:
+            return
+
+        budget = cfg.base_margin + cfg.grid_margin * self.config_mgr.grid.upper_grids
+        available = equity * self.config_mgr.account.usage_ratio
+        budget_cap = int(available // (budget * cfg.scale_safety)) if budget > 0 else cfg.max_symbols
+        budget_cap = max(budget_cap, cfg.scale_min_symbols)
+        budget_cap = min(budget_cap, cfg.scale_max_symbols)
+
+        current_max = cfg.max_symbols
+        if current_max > budget_cap:
+            new_max = max(budget_cap, cfg.scale_min_symbols)
+            if new_max < current_max:
+                cfg.max_symbols = new_max
+                if new_max < cfg.scale_expand_threshold_symbols:
+                    cfg.base_margin = max(self.base_margin_floor, cfg.base_margin - cfg.scale_base_step)
+                    cfg.grid_margin = max(self.grid_margin_floor, cfg.grid_margin - cfg.scale_grid_step)
+                self._apply_scaled_capacity(equity)
+                self.scale_anchor_equity = equity
+                self.scale_high_water = equity
+                self.last_scale_time = now
+                logger.info(
+                    f"缩容(budget): max_symbols={current_max}->{new_max}, "
+                    f"base={cfg.base_margin:.2f}, grid={cfg.grid_margin:.2f}"
+                )
+            return
+
+        expand_trigger = self.scale_anchor_equity * (1 + cfg.scale_step_pct)
+        if equity >= expand_trigger and current_max < cfg.scale_max_symbols:
+            new_max = min(current_max + 1, budget_cap)
+            if new_max > current_max:
+                cfg.max_symbols = new_max
+                if new_max >= cfg.scale_expand_threshold_symbols:
+                    cfg.base_margin = round(cfg.base_margin + cfg.scale_base_step, 6)
+                    cfg.grid_margin = round(cfg.grid_margin + cfg.scale_grid_step, 6)
+                self._apply_scaled_capacity(equity)
+                self.scale_anchor_equity = equity
+                self.scale_high_water = equity
+                self.last_scale_time = now
+                logger.info(
+                    f"扩张: equity={equity:.2f}, max_symbols={current_max}->{new_max}, "
+                    f"base={cfg.base_margin:.2f}, grid={cfg.grid_margin:.2f}"
+                )
+            return
+
+        drawdown_trigger = self.scale_high_water * (1 - cfg.scale_drawdown_pct)
+        if equity <= drawdown_trigger and current_max > cfg.scale_min_symbols:
+            new_max = max(current_max - 1, cfg.scale_min_symbols)
+            if new_max < current_max:
+                cfg.max_symbols = new_max
+                if new_max < cfg.scale_expand_threshold_symbols:
+                    cfg.base_margin = max(self.base_margin_floor, cfg.base_margin - cfg.scale_base_step)
+                    cfg.grid_margin = max(self.grid_margin_floor, cfg.grid_margin - cfg.scale_grid_step)
+                self._apply_scaled_capacity(equity)
+                self.scale_anchor_equity = equity
+                self.scale_high_water = equity
+                self.last_scale_time = now
+                logger.info(
+                    f"收缩: equity={equity:.2f}, max_symbols={current_max}->{new_max}, "
+                    f"base={cfg.base_margin:.2f}, grid={cfg.grid_margin:.2f}"
+                )
 
     def monitor_profit_rebalancing(self) -> None:
         """监控盈利并触发换仓"""

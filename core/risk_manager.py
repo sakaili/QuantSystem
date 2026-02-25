@@ -81,8 +81,8 @@ class RiskManager:
                 if alert:
                     alerts.append(alert)
 
-                    # Level 3立即止损
-                    if alert.level == 3:
+                    # Level 3处理（遵循action_required）
+                    if alert.level == 3 and alert.action_required:
                         self.execute_emergency_stop(symbol, alert.message)
 
                 # 检查资金费率
@@ -120,6 +120,11 @@ class RiskManager:
 
         # 计算价格比例
         price_ratio = current_price / entry_price
+        strong_ratio = self.config.stop_loss.ratio
+
+        # 若价格回落，尝试恢复开空
+        if price_ratio < strong_ratio:
+            self.grid_strategy.resume_shorts(symbol, "price back below pause threshold")
 
         # Level 1: 1.10×P0
         if price_ratio >= self.config.alerts.level_1_price:
@@ -138,11 +143,15 @@ class RiskManager:
                 alert.level = 2
                 alert.message = f"二级预警: 价格{current_price:.4f}逼近止损线(距离{(self.config.stop_loss.ratio - price_ratio)*100:.1f}%)"
 
-            # Level 3: 1.15×P0 止损
-            if price_ratio >= self.config.alerts.level_3_price:
+            # Level 3: strong uptrend -> pause adding shorts (no market close)
+            if price_ratio >= strong_ratio:
                 alert.level = 3
-                alert.message = f"触发止损: 价格{current_price:.4f}突破止损线{entry_price * self.config.stop_loss.ratio:.4f}"
-                alert.action_required = True
+                alert.message = (
+                    f"强趋势上行: 价格{current_price:.4f} >= 暂停阈值{entry_price * strong_ratio:.4f}, "
+                    "暂停加空，不执行市价全平"
+                )
+                alert.action_required = False
+                self.grid_strategy.pause_shorts(symbol, alert.message)
 
             logger.warning(f"{alert.message}")
             self.alert_history.append(alert)

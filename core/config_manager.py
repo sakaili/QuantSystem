@@ -53,6 +53,8 @@ class GridConfig:
     rebase_distance_k: float = 6.0
     rebase_confirm_hours: int = 12
     rebase_cooldown_hours: int = 12
+    rebase_down_pct: float = 0.0          # 软重建下行阈值(比例, 0则回退到K*spacing)
+    rebase_up_freeze_pct: float = 0.15    # 上行触发冻结重建的比例
 
 
 @dataclass
@@ -392,6 +394,12 @@ class ConfigManager:
 
         if not (0 < self.grid.min_success_rate_lower <= 1):
             raise ConfigurationError("下方网格成功率阈值必须在(0, 1]范围内")
+
+        if self.grid.rebase_down_pct < 0 or self.grid.rebase_down_pct >= 1:
+            raise ConfigurationError("下行重建比例必须在[0, 1)范围内")
+
+        if self.grid.rebase_up_freeze_pct < 0 or self.grid.rebase_up_freeze_pct >= 1:
+            raise ConfigurationError("上行冻结比例必须在[0, 1)范围内")
 
         if self.grid.repair_upper_max_gap_k < 0:
             raise ConfigurationError("修复上方最大偏离K必须≥0")

@@ -35,6 +35,8 @@ grid:
   rebase_distance_k: 6          # 触发阈值=K*spacing
   rebase_confirm_hours: 12      # 持续偏离确认时长(小时)
   rebase_cooldown_hours: 12     # 重建冷却时间(小时)
+  rebase_down_pct: 0.045        # 仅下行重建阈值(比例)
+  rebase_up_freeze_pct: 0.15    # 上行触发冻结重建阈值(比例)
 
 # 浠撲綅閰嶇疆 - Position Settings
 position:

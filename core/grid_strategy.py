@@ -94,6 +94,7 @@ class GridState:
     last_update: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     rebase_deviation_since: Optional[datetime] = None
     last_rebase_time: Optional[datetime] = None
+    rebase_frozen: bool = False
     shorts_paused: bool = False
     shorts_pause_reason: Optional[str] = None
 
@@ -234,7 +235,7 @@ class GridStrategy:
         return bool(grid_state.shorts_paused)
 
     def _maybe_soft_rebase(self, symbol: str, grid_state: GridState) -> bool:
-        """Soft rebase grids when price deviates too far for too long."""
+        """Soft rebase grids when price deviates too far on the downside."""
         if not self.config.grid.rebase_enabled:
             return False
 
@@ -248,34 +249,46 @@ class GridStrategy:
         if not center_price or center_price <= 0:
             return False
 
-        threshold = self.config.grid.rebase_distance_k * self.config.grid.spacing
-        if threshold <= 0:
+        down_pct = self.config.grid.rebase_down_pct
+        if down_pct <= 0:
+            down_pct = self.config.grid.rebase_distance_k * self.config.grid.spacing
+        if down_pct <= 0:
             return False
 
-        deviation = abs(current_price - center_price) / center_price
+        up_freeze_pct = self.config.grid.rebase_up_freeze_pct
+        if up_freeze_pct < 0:
+            up_freeze_pct = 0.0
+
         now = datetime.now(timezone.utc)
 
-        if deviation <= threshold:
-            grid_state.rebase_deviation_since = None
-            return False
+        if grid_state.rebase_frozen:
+            avg_entry = center_price
+            position = self.position_mgr.get_symbol_position(symbol)
+            if position:
+                avg_entry = position.get_average_entry_price() or avg_entry
+            if current_price <= avg_entry:
+                grid_state.rebase_frozen = False
+                grid_state.rebase_deviation_since = None
+                logger.info(f"{symbol} rebase unfrozen (price {current_price:.6f} <= avg {avg_entry:.6f})")
+            else:
+                return False
 
-        if grid_state.rebase_deviation_since is None:
-            grid_state.rebase_deviation_since = now
-            logger.info(
-                f"{symbol} deviation {deviation*100:.2f}% > "
-                f"threshold {threshold*100:.2f}%, start timer"
+        if up_freeze_pct > 0 and current_price >= center_price * (1 + up_freeze_pct):
+            grid_state.rebase_frozen = True
+            grid_state.rebase_deviation_since = None
+            logger.warning(
+                f"{symbol} rebase frozen (price {current_price:.6f} >= "
+                f"center {center_price:.6f} * (1+{up_freeze_pct:.3f}))"
             )
             return False
 
-        confirm_seconds = self.config.grid.rebase_confirm_hours * 3600
-        if (now - grid_state.rebase_deviation_since).total_seconds() < confirm_seconds:
+        if current_price >= center_price:
             return False
 
-        cooldown_seconds = self.config.grid.rebase_cooldown_hours * 3600
-        if grid_state.last_rebase_time:
-            elapsed = (now - grid_state.last_rebase_time).total_seconds()
-            if elapsed < cooldown_seconds:
-                return False
+        deviation = (center_price - current_price) / center_price
+        if deviation < down_pct:
+            grid_state.rebase_deviation_since = None
+            return False
 
         self._soft_rebase_grid(symbol, grid_state, current_price)
         grid_state.last_rebase_time = now

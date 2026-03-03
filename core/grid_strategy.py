@@ -1060,6 +1060,16 @@ class GridStrategy:
             logger.warning(f"{symbol} 获取价格失败，跳过修复: {e}")
             return
 
+        max_gap_k = self.config.grid.repair_upper_max_gap_k
+        max_gap_ratio = max_gap_k * self.config.grid.spacing if max_gap_k and max_gap_k > 0 else 0.0
+        max_repair_upper = self.config.grid.repair_upper_max_count
+        repaired_upper = 0
+
+        def _upper_price_too_far(price: float) -> bool:
+            if max_gap_ratio <= 0 or current_price <= 0:
+                return False
+            return (price - current_price) / current_price > max_gap_ratio
+
         # 查询当前挂单（避免重复）
         try:
             open_orders = self.connector.query_open_orders(symbol)
@@ -1076,10 +1086,29 @@ class GridStrategy:
 
         # 先对账：恢复遗失的订单状态（基于价格匹配）
         for order in open_orders:
+            if order.price is None:
+                continue
             order_price = self._quantize_price(symbol, order.price, side=order.side)
 
             # 检查是否应该在upper_orders中
             if order.side == 'sell':
+                if _upper_price_too_far(order_price):
+                    self._log_capacity_event(
+                        symbol,
+                        "repair_upper_far_cancel",
+                        (
+                            f"{symbol} cancel far upper order @ {order_price:.6f} "
+                            f"(price {current_price:.6f}, gap>{max_gap_ratio*100:.1f}%)"
+                        ),
+                        level="warning",
+                        interval=60
+                    )
+                    try:
+                        self.connector.cancel_order(order.order_id, symbol)
+                    except Exception as e:
+                        logger.warning(f"{symbol} cancel far upper order failed @ {order_price:.6f}: {e}")
+                    self._remove_order_id(grid_state.upper_orders, order_price, order.order_id)
+                    continue
                 # 检查价格是否接近任何预期的上方网格价格
                 for level in grid_state.grid_prices.get_upper_levels():
                     target_price = self._quantize_price(symbol, grid_state.grid_prices.grid_levels[level], side='sell')
@@ -1125,8 +1154,30 @@ class GridStrategy:
                 if target_price not in grid_state.upper_orders and target_price not in pending_upper_prices:
                     # 只有当市价低于目标价时才补充开空单
                     if current_price < target_price:
+                        if _upper_price_too_far(target_price):
+                            self._log_capacity_event(
+                                symbol,
+                                "repair_upper_far_skip",
+                                (
+                                    f"{symbol} skip far upper repair @ {target_price:.6f} "
+                                    f"(price {current_price:.6f}, gap>{max_gap_ratio*100:.1f}%)"
+                                ),
+                                level="info",
+                                interval=60
+                            )
+                            continue
+                        if max_repair_upper > 0 and repaired_upper >= max_repair_upper:
+                            self._log_capacity_event(
+                                symbol,
+                                "repair_upper_limit",
+                                f"{symbol} upper repair limit reached ({max_repair_upper})",
+                                level="info",
+                                interval=60
+                            )
+                            break
                         logger.info(f"{symbol} 补充缺失的上方网格 @ {target_price:.6f}")
                         self._place_single_upper_grid_by_price(symbol, grid_state, target_price)
+                        repaired_upper += 1
 
         # 修复下方网格（检查所有预期的网格价格）
         # 检查是否处于恢复场景（完全没有止盈单）

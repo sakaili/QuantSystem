@@ -23,6 +23,8 @@ grid:
   max_repair_retries: 3         # 鍗曚釜缃戞牸鏈€澶氶噸璇?娆?
   min_success_rate_upper: 0.8   # 涓婃柟缃戞牸鏈€浣?0%鎴愬姛鐜?
   min_success_rate_lower: 0.8   # 涓嬫柟缃戞牸鏈€浣?0%鎴愬姛鐜?
+  repair_upper_max_gap_k: 10    # 涓婃柟淇鏈€澶у亸绂?=K*spacing(0鍏抽棴)
+  repair_upper_max_count: 4     # 姣忚疆鏈€澶氫慨澶嶇殑涓婃柟缃戞牸鏁?0鍏抽棴)
 
   # 绉诲姩缃戞牸閰嶇疆锛堟棤闄愮綉鏍肩瓥鐣ワ級
   dynamic_expansion: true       # 鍚敤鍔ㄦ€佹墿灞?

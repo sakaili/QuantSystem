@@ -41,6 +41,8 @@ class GridConfig:
     max_repair_retries: int = 3
     min_success_rate_upper: float = 0.8
     min_success_rate_lower: float = 0.8
+    repair_upper_max_gap_k: float = 10.0     # 上方修复最大偏离(=K*spacing), 0禁用
+    repair_upper_max_count: int = 4          # 每轮最多修复的上方网格数, 0禁用
 
     # 移动网格配置（无限网格策略）
     dynamic_expansion: bool = True
@@ -390,6 +392,12 @@ class ConfigManager:
 
         if not (0 < self.grid.min_success_rate_lower <= 1):
             raise ConfigurationError("下方网格成功率阈值必须在(0, 1]范围内")
+
+        if self.grid.repair_upper_max_gap_k < 0:
+            raise ConfigurationError("修复上方最大偏离K必须≥0")
+
+        if self.grid.repair_upper_max_count < 0:
+            raise ConfigurationError("修复上方最大补单数必须≥0")
 
         # 验证动态扩张配置
         if self.position.scale_step_pct <= 0 or self.position.scale_step_pct > 1:

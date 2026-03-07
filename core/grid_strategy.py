@@ -91,6 +91,10 @@ class GridState:
     lower_orders: Dict[float, List[str]] = field(default_factory=dict)  # price -> [order_id]
     filled_upper_grids: Dict[str, UpperGridFill] = field(default_factory=dict)  # order_id -> fill_info（记录开仓信息）
     tp_to_upper: Dict[str, str] = field(default_factory=dict)  # tp_order_id -> upper_order_id
+    peak_short_size: float = 0.0          # 历史峰值空头仓位（ratchet 只增不减）
+    core_target_size: float = 0.0         # 需要锁定的核心仓位
+    core_ratio: float = 0.0               # 核心仓位比例（默认取配置 min_base_position_ratio）
+    ratchet_initialized: bool = False     # 是否已用当前仓位初始化 ratchet
     last_update: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     rebase_deviation_since: Optional[datetime] = None
     last_rebase_time: Optional[datetime] = None
@@ -173,14 +177,16 @@ class GridStrategy:
         log_fn = getattr(logger, level, logger.warning)
         log_fn(message)
 
-    def _add_order_id(self, orders: Dict[float, List[str]], price: float, order_id: str) -> None:
-        """Add order_id under price."""
+    def _add_order_id(self, orders: Dict[float, List[str]], price: float, order_id: str) -> bool:
+        """Add order_id under price; return True if newly added."""
         order_list = orders.get(price)
         if order_list is None:
             orders[price] = [order_id]
-            return
-        if order_id not in order_list:
-            order_list.append(order_id)
+            return True
+        if order_id in order_list:
+            return False
+        order_list.append(order_id)
+        return True
 
     def _remove_order_id(self, orders: Dict[float, List[str]], price: float, order_id: str) -> None:
         """Remove order_id under price."""
@@ -331,6 +337,106 @@ class GridStrategy:
         validation_passed, validation_msg = self._validate_grid_creation(symbol, grid_state)
         if not validation_passed:
             logger.warning(f"{symbol} rebase grid validation failed: {validation_msg}")
+    def _count_base_tp_orders(self, grid_state: GridState) -> int:
+        """Count base TP orders (exclude upper->TP cycles)."""
+        count = 0
+        for price, order_ids in grid_state.lower_orders.items():
+            for order_id in order_ids:
+                if order_id not in grid_state.tp_to_upper:
+                    count += 1
+        return count
+
+    def _compute_base_tp_allowed_levels(self, total_levels: int) -> int:
+        """Compute allowed base TP levels based on min base ratio and margin."""
+        base_margin = self.config.position.base_margin
+        grid_margin = self.config.position.grid_margin
+        min_ratio = self.config.position.min_base_position_ratio
+        closeable_ratio = 1.0 - min_ratio
+        closeable_margin = base_margin * closeable_ratio
+        allowed_levels_by_ratio = int(total_levels * closeable_ratio)
+        allowed_levels_by_margin = int(closeable_margin // grid_margin) if grid_margin > 0 else 0
+        return min(allowed_levels_by_ratio, allowed_levels_by_margin)
+
+    def _get_core_inventory_ratio(self, grid_state: GridState) -> float:
+        """Return configured core inventory ratio for a symbol."""
+        ratio = grid_state.core_ratio or self.config.position.min_base_position_ratio
+        ratio = max(0.0, min(float(ratio), 1.0))
+        return ratio
+
+    def _refresh_inventory_ratchet(
+        self,
+        symbol: str,
+        grid_state: GridState,
+        *,
+        current_short_size: Optional[float] = None,
+        force_refresh: bool = False
+    ) -> float:
+        """Refresh ratchet state from live short position.
+
+        Ratchet rules:
+        - peak_short_size only increases
+        - core_target_size = peak_short_size * core_ratio
+        - on first adoption, current short size seeds the peak
+        """
+        if current_short_size is None:
+            short_position = self._get_cached_short_position(symbol, force_refresh=force_refresh)
+            current_short_size = short_position.size if short_position else 0.0
+
+        ratio = self._get_core_inventory_ratio(grid_state)
+        grid_state.core_ratio = ratio
+
+        old_peak = grid_state.peak_short_size
+        if not grid_state.ratchet_initialized and current_short_size > 0:
+            grid_state.peak_short_size = max(grid_state.peak_short_size, current_short_size)
+            grid_state.ratchet_initialized = True
+            logger.info(
+                f"{symbol} 启用核心仓 ratchet: current={current_short_size:.2f}, "
+                f"peak={grid_state.peak_short_size:.2f}, core_ratio={ratio*100:.0f}%"
+            )
+        elif current_short_size > grid_state.peak_short_size:
+            grid_state.peak_short_size = current_short_size
+            logger.info(
+                f"{symbol} ratchet 峰值更新: {old_peak:.2f} → {grid_state.peak_short_size:.2f}"
+            )
+
+        grid_state.core_target_size = grid_state.peak_short_size * ratio if grid_state.peak_short_size > 0 else 0.0
+        return current_short_size
+
+    def _get_pending_lower_order_amount(
+        self,
+        symbol: str,
+        grid_state: GridState,
+        open_orders: Optional[List[Order]] = None
+    ) -> float:
+        """Return total open BUY reduce-only exposure tracked in lower_orders."""
+        if open_orders is None:
+            open_orders = self._get_open_orders_safe(symbol)
+
+        open_order_map = {order.order_id: order for order in open_orders}
+        pending_lower_total = 0.0
+        for _, order_ids in grid_state.lower_orders.items():
+            for order_id in order_ids:
+                order = open_order_map.get(order_id)
+                if order and order.side == 'buy':
+                    pending_lower_total += order.amount
+        return pending_lower_total
+
+    def _get_tradable_short_size(
+        self,
+        symbol: str,
+        grid_state: GridState,
+        *,
+        current_short_size: Optional[float] = None,
+        force_refresh: bool = False
+    ) -> float:
+        """Return short inventory that is allowed to participate in ordinary TP."""
+        current_short_size = self._refresh_inventory_ratchet(
+            symbol,
+            grid_state,
+            current_short_size=current_short_size,
+            force_refresh=force_refresh
+        )
+        return max(current_short_size - grid_state.core_target_size, 0.0)
 
     def _has_tp_for_upper(self, grid_state: GridState, upper_order_id: str) -> bool:
         """Return True if any TP is mapped to upper_order_id."""
@@ -485,10 +591,12 @@ class GridStrategy:
             grid_state = GridState(
                 symbol=symbol,
                 entry_price=entry_price,
-                grid_prices=grid_prices
+                grid_prices=grid_prices,
+                core_ratio=self.config.position.min_base_position_ratio
             )
 
             self.grid_states[symbol] = grid_state
+            self._refresh_inventory_ratchet(symbol, grid_state, force_refresh=True)
 
             # 4. 挂基础仓位的分层止盈单（先挂止盈保护）
             logger.info("挂基础仓位分层止盈单...")
@@ -583,12 +691,13 @@ class GridStrategy:
             tuple[bool, str]: (是否通过验证, 详细信息)
         """
         upper_count = len(grid_state.grid_prices.get_upper_levels())
-        lower_count = len(grid_state.grid_prices.get_lower_levels())
+        total_lower_levels = len(grid_state.grid_prices.get_lower_levels())
+        lower_count = self._compute_base_tp_allowed_levels(total_lower_levels)
         upper_created = min(self._count_orders(grid_state.upper_orders), upper_count)
-        lower_created = min(self._count_orders(grid_state.lower_orders), lower_count)
+        lower_created = min(self._count_orders(grid_state.lower_orders), lower_count) if lower_count > 0 else 0
 
         upper_success_rate = upper_created / upper_count if upper_count > 0 else 0.0
-        lower_success_rate = lower_created / lower_count if lower_count > 0 else 0.0
+        lower_success_rate = lower_created / lower_count if lower_count > 0 else 1.0
 
         grid_state.upper_success_rate = upper_success_rate
         grid_state.lower_success_rate = lower_success_rate
@@ -606,7 +715,7 @@ class GridStrategy:
             return False, msg
 
         # 下方网格仅告警（止盈单，不关键）
-        if lower_success_rate < self.config.grid.min_success_rate_lower:
+        if lower_count > 0 and lower_success_rate < self.config.grid.min_success_rate_lower:
             logger.warning(
                 f"{symbol} 下方网格成功率{lower_success_rate*100:.1f}% < "
                 f"{self.config.grid.min_success_rate_lower*100:.0f}%"
@@ -861,13 +970,10 @@ class GridStrategy:
                 logger.warning(f"挂单失败 Grid-{level}: {e}")
 
     def _place_base_position_take_profit(self, symbol: str, grid_state: GridState) -> None:
-        """Place layered take-profit orders for the base position (keep min base ratio)."""
+        """Place layered take-profit orders for the tradable tranche only."""
         base_margin = self.config.position.base_margin
         grid_margin = self.config.position.grid_margin
         min_ratio = self.config.position.min_base_position_ratio
-
-        closeable_ratio = 1.0 - min_ratio
-        closeable_margin = base_margin * closeable_ratio
 
         try:
             current_price = self.connector.get_current_price(symbol)
@@ -877,14 +983,12 @@ class GridStrategy:
         lower_levels = self._get_lower_levels_by_proximity(grid_state, current_price)
         total_levels = len(lower_levels)
 
-        allowed_levels_by_ratio = int(total_levels * closeable_ratio)
-        allowed_levels_by_margin = int(closeable_margin // grid_margin) if grid_margin > 0 else 0
-        allowed_levels = min(allowed_levels_by_ratio, allowed_levels_by_margin)
+        allowed_levels = self._compute_base_tp_allowed_levels(total_levels)
 
         base_amount_per_level = self._calculate_amount(symbol, grid_margin, grid_state.entry_price)
 
         logger.info(f"Base TP orders: {allowed_levels}/{total_levels} levels, {base_amount_per_level:.1f} each")
-        logger.info(f"Keep min base: {min_ratio*100:.0f}%")
+        logger.info(f"Ratchet core keep ratio: {min_ratio*100:.0f}%")
         if allowed_levels <= 0:
             logger.info(f"{symbol} base TP levels = 0")
             return
@@ -1047,8 +1151,8 @@ class GridStrategy:
         now = datetime.now(timezone.utc)
         elapsed = (now - grid_state.last_repair_check).total_seconds()
 
-        # 恢复模式：如果完全没有止盈单，使用更短的间隔（2秒）
-        is_recovery = len(grid_state.lower_orders) == 0
+        # 恢复模式：如果完全没有基础止盈单，使用更短的间隔（2秒）
+        is_recovery = self._count_base_tp_orders(grid_state) == 0
         repair_interval = 2 if is_recovery else self.config.grid.repair_interval
 
         return elapsed >= repair_interval
@@ -1126,8 +1230,9 @@ class GridStrategy:
                 for level in grid_state.grid_prices.get_upper_levels():
                     target_price = self._quantize_price(symbol, grid_state.grid_prices.grid_levels[level], side='sell')
                     if abs(order_price - target_price) / target_price < 0.001:  # 0.1%容差
-                        self._add_order_id(grid_state.upper_orders, order_price, order.order_id)
-                        logger.info(f"{symbol} 恢复遗失的上方网格 @ {order_price:.6f}")
+                        added = self._add_order_id(grid_state.upper_orders, order_price, order.order_id)
+                        if added:
+                            logger.info(f"{symbol} 恢复遗失的上方网格 @ {order_price:.6f}")
                         break
 
             # 检查是否应该在lower_orders中
@@ -1136,8 +1241,9 @@ class GridStrategy:
                 for level in grid_state.grid_prices.get_lower_levels():
                     target_price = self._quantize_price(symbol, grid_state.grid_prices.grid_levels[level], side='buy')
                     if abs(order_price - target_price) / target_price < 0.001:
-                        self._add_order_id(grid_state.lower_orders, order_price, order.order_id)
-                        logger.info(f"{symbol} 恢复遗失的下方网格 @ {order_price:.6f}")
+                        added = self._add_order_id(grid_state.lower_orders, order_price, order.order_id)
+                        if added:
+                            logger.info(f"{symbol} 恢复遗失的下方网格 @ {order_price:.6f}")
                         break
 
         # 清理state中已失效的订单ID
@@ -1192,23 +1298,38 @@ class GridStrategy:
                         self._place_single_upper_grid_by_price(symbol, grid_state, target_price)
                         repaired_upper += 1
 
-        # 修复下方网格（检查所有预期的网格价格）
-        # 检查是否处于恢复场景（完全没有止盈单）
-        is_recovery = len(grid_state.lower_orders) == 0
+        # 修复下方网格（仅补足允许的基础止盈数量）
+        base_tp_count = self._count_base_tp_orders(grid_state)
+        lower_levels = self._get_lower_levels_by_proximity(grid_state, current_price)
+        total_levels = len(lower_levels)
+        allowed_levels = self._compute_base_tp_allowed_levels(total_levels)
+        is_recovery = base_tp_count == 0
 
-        for level in grid_state.grid_prices.get_lower_levels():
-            target_price = self._quantize_price(symbol, grid_state.grid_prices.grid_levels[level], side='buy')
+        if allowed_levels > 0:
+            for level in lower_levels:
+                if base_tp_count >= allowed_levels:
+                    break
+                target_price = self._quantize_price(symbol, grid_state.grid_prices.grid_levels[level], side='buy')
+                order_ids = grid_state.lower_orders.get(target_price, [])
+                has_base = any(order_id not in grid_state.tp_to_upper for order_id in order_ids)
+                if has_base:
+                    continue
 
-            # 检查是否缺失
-            if target_price not in grid_state.lower_orders:
-                # 在恢复场景下，无论价格如何都补充止盈单
-                # 在正常场景下，只有当市价高于目标价时才补充
-                if is_recovery or current_price > target_price:
-                    if is_recovery:
-                        logger.info(f"{symbol} [恢复模式] 补充缺失的下方网格 @ {target_price:.6f}")
-                    else:
-                        logger.info(f"{symbol} 补充缺失的下方网格 @ {target_price:.6f}")
-                    self._place_single_lower_grid_by_price(symbol, grid_state, target_price)
+                if not (is_recovery or current_price > target_price):
+                    continue
+
+                if is_recovery:
+                    logger.info(f"{symbol} [恢复模式] 补充缺失的下方网格 @ {target_price:.6f}")
+                else:
+                    logger.info(f"{symbol} 补充缺失的下方网格 @ {target_price:.6f}")
+
+                before_count = self._count_orders(grid_state.lower_orders)
+                self._place_single_lower_grid_by_price(symbol, grid_state, target_price)
+                after_count = self._count_orders(grid_state.lower_orders)
+                if after_count > before_count:
+                    base_tp_count += (after_count - before_count)
+                else:
+                    break
 
         self._repair_missing_tps(symbol, grid_state, open_order_ids)
 
@@ -1956,6 +2077,7 @@ class GridStrategy:
         """更新单个网格状态（基于价格）"""
         if self._maybe_soft_rebase(symbol, grid_state):
             return
+        current_short_size = self._refresh_inventory_ratchet(symbol, grid_state, force_refresh=True)
 
         # 查询所有订单
         orders = {order.order_id: order for order in self.connector.query_open_orders(symbol)}
@@ -2165,7 +2287,14 @@ class GridStrategy:
             grid_state = GridState(
                 symbol=symbol,
                 entry_price=actual_entry_price,  # 使用持仓成本价
-                grid_prices=grid_prices
+                grid_prices=grid_prices,
+                core_ratio=self.config.position.min_base_position_ratio
+            )
+            self._refresh_inventory_ratchet(
+                symbol,
+                grid_state,
+                current_short_size=short_position.size,
+                force_refresh=False
             )
 
             # 查询现有挂单
@@ -2458,47 +2587,48 @@ class GridStrategy:
         grid_state: GridState,
         new_order_amount: float
     ) -> tuple:
-        """Validate that new buy orders won't reduce below min base ratio."""
+        """Validate that new buy orders won't eat into ratcheted core inventory."""
         short_position = self._get_cached_short_position(symbol)
         if not short_position:
             return False, 0.0, "no short position"
 
-        current_short_size = short_position.size
-        base_margin = self.config.position.base_margin
-        min_ratio = self.config.position.min_base_position_ratio
-        expected_base = self._calculate_amount(symbol, base_margin, grid_state.entry_price)
-        min_base_amount = expected_base * min_ratio
+        current_short_size = self._refresh_inventory_ratchet(
+            symbol,
+            grid_state,
+            current_short_size=short_position.size,
+            force_refresh=False
+        )
 
-        pending_lower_total = 0.0
         try:
             open_orders = self.connector.query_open_orders(symbol)
-            open_order_map = {order.order_id: order for order in open_orders}
-            for price, order_ids in grid_state.lower_orders.items():
-                for order_id in order_ids:
-                    order = open_order_map.get(order_id)
-                    if order and order.side == 'buy':
-                        pending_lower_total += order.amount
+            pending_lower_total = self._get_pending_lower_order_amount(symbol, grid_state, open_orders=open_orders)
         except Exception:
             pending_lower_total = 0.0
 
-        max_closeable = max(current_short_size - min_base_amount, 0.0)
-        available_capacity = max_closeable - pending_lower_total
+        max_closeable = max(current_short_size - grid_state.core_target_size, 0.0)
+        available_capacity = max(max_closeable - pending_lower_total, 0.0)
 
         safe_amount = min(new_order_amount, available_capacity)
         if max_closeable <= 0:
-            warning = "min base reserved, no closeable capacity"
+            warning = (
+                f"core inventory locked: current={current_short_size:.2f}, "
+                f"core={grid_state.core_target_size:.2f}"
+            )
             return False, 0.0, warning
         if available_capacity <= 0:
-            warning = "min base reserved, pending orders exceed closeable"
+            warning = (
+                f"pending buy orders fully consume tradable inventory: "
+                f"tradable={max_closeable:.2f}, pending={pending_lower_total:.2f}"
+            )
             return False, 0.0, warning
 
         ratio = (pending_lower_total + safe_amount) / max_closeable if max_closeable > 0 else 0
-        if safe_amount < new_order_amount * 0.9:
+        if safe_amount < new_order_amount:
             warning = (
-                f"lower grid capacity insufficient: closeable={available_capacity:.2f}/{max_closeable:.2f} "
+                f"buy capacity limited by ratchet: tradable={available_capacity:.2f}/{max_closeable:.2f} "
                 f"target={new_order_amount:.2f} safe={safe_amount:.2f} ({ratio*100:.1f}%)"
             )
-            return False, safe_amount, warning
+            return True, safe_amount, warning
         elif ratio > 0.90:
             warning = f"lower grid near saturation: {ratio*100:.1f}%"
             return True, safe_amount, warning
@@ -2534,7 +2664,13 @@ class GridStrategy:
             logger.critical(f"{symbol} ⚠️ CRITICAL: 对账失败 - 无法找到空头仓位！")
             return
 
-        short_size = short_position.size
+        short_size = self._refresh_inventory_ratchet(
+            symbol,
+            grid_state,
+            current_short_size=short_position.size,
+            force_refresh=False
+        )
+        tradable_size = max(short_size - grid_state.core_target_size, 0.0)
 
         # 2. 统计所有下方买单的总数量
         total_lower_amount = 0.0
@@ -2544,38 +2680,68 @@ class GridStrategy:
             open_orders = self.connector.query_open_orders(symbol)
             open_order_map = {order.order_id: order for order in open_orders}
 
+            buy_orders = []
             for price, order_ids in grid_state.lower_orders.items():
                 for order_id in order_ids:
                     order = open_order_map.get(order_id)
                     if order and order.side == 'buy':
                         total_lower_amount += order.amount
                         lower_order_count += 1
+                        effective_price = self._quantize_price(symbol, order.price, side=order.side) if order.price is not None else price
+                        buy_orders.append((effective_price, order))
 
         except Exception as e:
             logger.error(f"{symbol} 对账时查询挂单失败: {e}")
             return
 
-        # 3. 计算平衡比例
-        ratio = total_lower_amount / short_size if short_size > 0 else 0
+        # 3. 如果 pending buy 超过可交易仓，优先取消更远的低价买单（保留更接近现价的订单）
+        if total_lower_amount > tradable_size + 1e-9:
+            excess = total_lower_amount - tradable_size
+            cancelled_amount = 0.0
+            cancelled_count = 0
+            buy_orders.sort(key=lambda item: item[0])
 
-        # 4. 记录平衡状态（仅记录，不做撤单或标记）
+            for effective_price, order in buy_orders:
+                if excess - cancelled_amount <= 1e-9:
+                    break
+                try:
+                    if self.connector.cancel_order(order.order_id, symbol):
+                        self._remove_order_id(grid_state.lower_orders, effective_price, order.order_id)
+                        grid_state.tp_to_upper.pop(order.order_id, None)
+                        cancelled_amount += order.amount
+                        cancelled_count += 1
+                except Exception as e:
+                    logger.warning(f"{symbol} 取消超额下方买单失败 @{effective_price:.6f}: {e}")
+
+            if cancelled_count > 0:
+                total_lower_amount = max(total_lower_amount - cancelled_amount, 0.0)
+                lower_order_count = max(lower_order_count - cancelled_count, 0)
+                logger.warning(
+                    f"{symbol} ratchet 对账取消超额下方买单: {cancelled_count}个, "
+                    f"{cancelled_amount:.2f}张; core={grid_state.core_target_size:.2f}, tradable={tradable_size:.2f}"
+                )
+
+        # 4. 计算平衡比例
+        ratio = total_lower_amount / tradable_size if tradable_size > 0 else (1.0 if total_lower_amount > 0 else 0.0)
+
+        # 5. 记录平衡状态
         if ratio > 0.95:
             logger.warning(
                 f"{symbol} 下方买单过高: "
                 f"{total_lower_amount:.2f}张 ({lower_order_count}个订单), "
-                f"空头仓位={short_size:.2f}张, "
+                f"空头仓位={short_size:.2f}张, 核心仓={grid_state.core_target_size:.2f}张, "
                 f"比例={ratio*100:.1f}%"
             )
         elif ratio > 0.85:
             logger.warning(
-                f"{symbol} 下方买单接近上限: "
-                f"{total_lower_amount:.2f}/{short_size:.2f}张 ({ratio*100:.1f}%)"
+                f"{symbol} 下方买单接近交易仓上限: "
+                f"{total_lower_amount:.2f}/{tradable_size:.2f}张 ({ratio*100:.1f}%)"
             )
         else:
             logger.info(
                 f"{symbol} 仓位平衡健康: "
                 f"下方买单={total_lower_amount:.2f}张 ({lower_order_count}个), "
-                f"空头仓位={short_size:.2f}张, "
+                f"空头仓位={short_size:.2f}张, 核心仓={grid_state.core_target_size:.2f}张, "
                 f"比例={ratio*100:.1f}%"
             )
 
